@@ -48,3 +48,26 @@ target_compile_options(test_gpu PRIVATE -fobjc-arc)
 target_compile_definitions(test_gpu PRIVATE OPENFILM_METALLIB_PATH="${OPENFILM_METALLIB}")
 add_dependencies(test_gpu openfilm_metallib)
 add_test(NAME gpu COMMAND test_gpu)
+
+# --- OpenFX SDK: C headers + the official C++ "Support" wrapper library ------
+set(OFX_DIR ${CMAKE_SOURCE_DIR}/external/openfx)
+file(GLOB OFX_SUPPORT_SRC ${OFX_DIR}/Support/Library/*.cpp)
+add_library(ofx_support STATIC ${OFX_SUPPORT_SRC})
+target_include_directories(ofx_support
+  PUBLIC ${OFX_DIR}/include ${OFX_DIR}/Support/include
+  PRIVATE ${OFX_DIR}/Support/Library)
+target_compile_options(ofx_support PRIVATE -w)  # third-party code: silence its warnings
+
+# --- The plugin: build/OpenFilm.ofx.bundle ------------------------------------
+set(OPENFILM_BUNDLE_DIR ${CMAKE_BINARY_DIR}/OpenFilm.ofx.bundle)
+openfilm_add_ofx_bundle(OpenFilm ${OPENFILM_BUNDLE_DIR} ${OPENFILM_METALLIB} openfilm_metallib
+  SOURCES src/ofx/openfilm_plugin.cpp
+  LIBS ofx_support openfilm_metal)
+
+# --- Plugin bundle tests ------------------------------------------------------
+add_executable(test_bundle tests/ofx/test_bundle_loads.cpp)
+target_link_libraries(test_bundle PRIVATE openfilm_metal doctest::doctest)
+target_include_directories(test_bundle PRIVATE ${OFX_DIR}/include)
+target_compile_definitions(test_bundle PRIVATE OPENFILM_BUNDLE_DIR="${OPENFILM_BUNDLE_DIR}")
+add_dependencies(test_bundle OpenFilm)
+add_test(NAME bundle COMMAND test_bundle)

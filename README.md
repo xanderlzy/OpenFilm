@@ -9,4 +9,6 @@ Status: early development (Milestone 1 — plugin scaffold).
 See [docs/building.md](docs/building.md) to build, test and install.
 Design: [docs/superpowers/specs/2026-11-08-film-emulator-design.md](docs/superpowers/specs/2026-11-08-film-emulator-design.md).
 
+Built against OpenFX `OFX_Release_1.5.1` (git submodule in `external/openfx`).
+
 Licence: MIT.

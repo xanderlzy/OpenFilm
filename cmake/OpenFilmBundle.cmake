@@ -30,3 +30,36 @@ function(openfilm_add_metallib target out)
     VERBATIM)
   add_custom_target(${target} ALL DEPENDS ${out})
 endfunction()
+
+# openfilm_add_ofx_bundle(<target> <bundle_dir> <metallib> <metallib_target>
+#                         SOURCES <src>... LIBS <lib>...)
+#
+# An OFX plugin on macOS is a folder ("bundle") that Resolve scans in /Library/OFX/Plugins:
+#   OpenFilm.ofx.bundle/Contents/Info.plist              bundle description
+#   OpenFilm.ofx.bundle/Contents/MacOS/OpenFilm.ofx      the compiled plugin
+#   OpenFilm.ofx.bundle/Contents/Resources/OpenFilm.metallib   GPU shaders
+# Apple Silicon refuses to load unsigned code, so the bundle gets an ad-hoc signature ("-").
+function(openfilm_add_ofx_bundle target bundle_dir metallib metallib_target)
+  cmake_parse_arguments(ARG "" "" "SOURCES;LIBS" ${ARGN})
+  add_library(${target} MODULE ${ARG_SOURCES})
+  target_link_libraries(${target} PRIVATE ${ARG_LIBS})
+  set_target_properties(${target} PROPERTIES
+    PREFIX ""
+    SUFFIX ".ofx"
+    LIBRARY_OUTPUT_DIRECTORY ${bundle_dir}/Contents/MacOS)
+  # Only the two OFX entry points are visible to Resolve; everything else stays private.
+  target_link_options(${target} PRIVATE
+    "LINKER:-exported_symbol,_OfxGetNumberOfPlugins"
+    "LINKER:-exported_symbol,_OfxGetPlugin")
+  # Re-run the post-build steps (copy + sign) whenever the shaders change.
+  set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${metallib})
+  add_dependencies(${target} ${metallib_target})
+
+  configure_file(${CMAKE_SOURCE_DIR}/src/ofx/Info.plist.in ${bundle_dir}/Contents/Info.plist @ONLY)
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${bundle_dir}/Contents/Resources
+    COMMAND ${CMAKE_COMMAND} -E copy ${metallib} ${bundle_dir}/Contents/Resources/
+    COMMAND codesign --force --deep -s - ${bundle_dir}
+    COMMENT "Assembling and signing ${bundle_dir}"
+    VERBATIM)
+endfunction()
