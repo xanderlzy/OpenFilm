@@ -24,6 +24,11 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_MakeAvailable(doctest)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
 
+# nlohmann/json: reads the film-stock files.
+FetchContent_Declare(nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # --- Jakob-Hanika table: Rec.2020 RGB -> spectrum coefficients, built once ----
 # The optimiser takes a few seconds, so it only reruns when the tool itself changes.
 add_executable(rgb2spec_opt tools/rgb2spec/rgb2spec_opt.cpp)
@@ -39,10 +44,11 @@ add_custom_command(
 add_custom_target(openfilm_coeff DEPENDS ${OPENFILM_COEFF})
 
 # --- Core: plain C++ film maths, no OFX or Apple dependencies ---------------
-add_library(openfilm_core STATIC src/core/cpu_renderer.cpp src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp)
+add_library(openfilm_core STATIC src/core/cpu_renderer.cpp src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp)
 target_include_directories(openfilm_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(openfilm_core PUBLIC nlohmann_json::nlohmann_json)
 
-add_executable(test_core tests/core/test_cpu_renderer.cpp tests/core/test_spectral.cpp tests/core/test_color.cpp tests/core/test_gamut.cpp tests/core/test_rgb2spec.cpp)
+add_executable(test_core tests/core/test_cpu_renderer.cpp tests/core/test_spectral.cpp tests/core/test_color.cpp tests/core/test_gamut.cpp tests/core/test_rgb2spec.cpp tests/core/test_stock.cpp tests/core/test_densitometry.cpp)
 target_compile_definitions(test_core PRIVATE OPENFILM_SOURCE_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
   OPENFILM_COEFF_PATH="${OPENFILM_COEFF}")
 add_dependencies(test_core openfilm_coeff)
