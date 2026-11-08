@@ -63,6 +63,16 @@ std::array<double, 3> Rgb2Spec::coefficients(const Vec3& rgbIn) const {
     return {double(data_[0]), double(data_[1]), double(data_[2])};
   }
 
+  // A grey must give a perfectly flat curve; the interpolated table is only close to flat, which
+  // would tint neutrals. For equal channels the exact answer is a constant reflectance z
+  // (closed form from Mitsuba's rgb2spec).
+  // "Equal" allows for rounding noise from upstream matrix maths (a DWG grey is not bit-exact).
+  const double lo = std::min({rgb[0], rgb[1], rgb[2]});
+  if (z - lo <= 1e-9 * z) {
+    const double g = std::clamp(z, 1e-9, 1.0 - 1e-9);
+    return {0.0, 0.0, (g - 0.5) / std::sqrt(g * (1.0 - g))};
+  }
+
   const int res = res_;
   const double s = (res - 1) / z;
   const double x = rgb[(i + 1) % 3] * s, y = rgb[(i + 2) % 3] * s;

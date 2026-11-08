@@ -171,3 +171,10 @@ TEST_CASE("non-finite input channels give finite spectra") {
   for (int i = 0; i < kSpectralSamples; ++i) CHECK(a[i] == b[i]);
   for (double v : model().coefficients({nan, inf, -inf})) CHECK(std::isfinite(v));
 }
+
+TEST_CASE("grey input gives a flat spectrum") {
+  for (double g : {0.001, 0.05, 0.18, 0.5, 1.0, 3.0}) {
+    const Spectrum s = model().toSpectrum({g, g, g});
+    for (double v : s) CHECK(std::abs(v - g) < 1e-9);
+  }
+}
