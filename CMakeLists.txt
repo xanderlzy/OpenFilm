@@ -25,10 +25,11 @@ FetchContent_MakeAvailable(doctest)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
 
 # --- Core: plain C++ film maths, no OFX or Apple dependencies ---------------
-add_library(openfilm_core STATIC src/core/cpu_renderer.cpp)
+add_library(openfilm_core STATIC src/core/cpu_renderer.cpp src/core/spectral.cpp)
 target_include_directories(openfilm_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 
-add_executable(test_core tests/core/test_cpu_renderer.cpp)
+add_executable(test_core tests/core/test_cpu_renderer.cpp tests/core/test_spectral.cpp)
+target_compile_definitions(test_core PRIVATE OPENFILM_SOURCE_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
 target_link_libraries(test_core PRIVATE openfilm_core doctest::doctest_with_main)
 add_test(NAME core COMMAND test_core)
 
