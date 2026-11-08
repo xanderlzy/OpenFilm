@@ -43,6 +43,22 @@ add_custom_command(
   VERBATIM)
 add_custom_target(openfilm_coeff DEPENDS ${OPENFILM_COEFF})
 
+# --- Resources: everything the film model reads at run time, staged for the bundle -------------
+# Layout matches FilmResources::load(): <resources>/data/spectral, <resources>/data/stocks, rec2020.coeff.
+file(GLOB OPENFILM_SPECTRAL_CSV ${CMAKE_SOURCE_DIR}/data/spectral/*.csv)
+file(GLOB OPENFILM_STOCK_JSON ${CMAKE_SOURCE_DIR}/data/stocks/*.json)
+set(OPENFILM_RESOURCES_STAMP ${CMAKE_BINARY_DIR}/resources/.stamp)
+add_custom_command(
+  OUTPUT ${OPENFILM_RESOURCES_STAMP}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/resources/data/spectral ${CMAKE_BINARY_DIR}/resources/data/stocks
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENFILM_SPECTRAL_CSV} ${CMAKE_BINARY_DIR}/resources/data/spectral/
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENFILM_STOCK_JSON} ${CMAKE_BINARY_DIR}/resources/data/stocks/
+  COMMAND ${CMAKE_COMMAND} -E touch ${OPENFILM_RESOURCES_STAMP}
+  DEPENDS ${OPENFILM_SPECTRAL_CSV} ${OPENFILM_STOCK_JSON} ${OPENFILM_COEFF}
+  COMMENT "Staging film resources"
+  VERBATIM)
+add_custom_target(openfilm_resources DEPENDS ${OPENFILM_RESOURCES_STAMP})
+
 # --- Core: plain C++ film maths, no OFX or Apple dependencies ---------------
 add_library(openfilm_core STATIC src/core/cpu_renderer.cpp src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp src/core/negative.cpp src/core/print.cpp src/core/film_model.cpp src/core/lut.cpp src/core/film_renderer.cpp)
 target_include_directories(openfilm_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
@@ -84,6 +100,7 @@ target_compile_options(ofx_support PRIVATE -w)  # third-party code: silence its 
 # --- The plugin: build/OpenFilm.ofx.bundle ------------------------------------
 set(OPENFILM_BUNDLE_DIR ${CMAKE_BINARY_DIR}/OpenFilm.ofx.bundle)
 openfilm_add_ofx_bundle(OpenFilm ${OPENFILM_BUNDLE_DIR} ${OPENFILM_METALLIB} openfilm_metallib
+  ${OPENFILM_RESOURCES_STAMP} openfilm_resources
   SOURCES src/ofx/openfilm_plugin.cpp
   LIBS ofx_support openfilm_metal)
 

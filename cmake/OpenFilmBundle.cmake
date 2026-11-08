@@ -31,15 +31,16 @@ function(openfilm_add_metallib target out)
   add_custom_target(${target} ALL DEPENDS ${out})
 endfunction()
 
-# openfilm_add_ofx_bundle(<target> <bundle_dir> <metallib> <metallib_target>
+# openfilm_add_ofx_bundle(<target> <bundle_dir> <metallib> <metallib_target> <res_stamp> <res_target>
 #                         SOURCES <src>... LIBS <lib>...)
 #
 # An OFX plugin on macOS is a folder ("bundle") that Resolve scans in /Library/OFX/Plugins:
 #   OpenFilm.ofx.bundle/Contents/Info.plist              bundle description
 #   OpenFilm.ofx.bundle/Contents/MacOS/OpenFilm.ofx      the compiled plugin
 #   OpenFilm.ofx.bundle/Contents/Resources/OpenFilm.metallib   GPU shaders
+#   OpenFilm.ofx.bundle/Contents/Resources/data, rec2020.coeff   film stocks and spectral tables
 # Apple Silicon refuses to load unsigned code, so the bundle gets an ad-hoc signature ("-").
-function(openfilm_add_ofx_bundle target bundle_dir metallib metallib_target)
+function(openfilm_add_ofx_bundle target bundle_dir metallib metallib_target res_stamp res_target)
   cmake_parse_arguments(ARG "" "" "SOURCES;LIBS" ${ARGN})
   add_library(${target} MODULE ${ARG_SOURCES})
   target_link_libraries(${target} PRIVATE ${ARG_LIBS})
@@ -57,13 +58,16 @@ function(openfilm_add_ofx_bundle target bundle_dir metallib metallib_target)
   configure_file(${CMAKE_SOURCE_DIR}/src/ofx/Info.plist.in ${plist} @ONLY)
 
   # Re-run the post-build steps (copy + sign) whenever the shaders or the plist change.
-  set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${metallib} ${plist})
-  add_dependencies(${target} ${metallib_target})
+  set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${metallib} ${plist} ${res_stamp})
+  add_dependencies(${target} ${metallib_target} ${res_target})
 
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory ${bundle_dir}/Contents/Resources
     COMMAND ${CMAKE_COMMAND} -E copy ${plist} ${bundle_dir}/Contents/Info.plist
     COMMAND ${CMAKE_COMMAND} -E copy ${metallib} ${bundle_dir}/Contents/Resources/
+    # Film data goes in before codesign so the signature covers it.
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_BINARY_DIR}/resources ${bundle_dir}/Contents/Resources
+    COMMAND ${CMAKE_COMMAND} -E remove -f ${bundle_dir}/Contents/Resources/.stamp
     COMMAND codesign --force --deep -s - ${bundle_dir}
     COMMENT "Assembling and signing ${bundle_dir}"
     VERBATIM)

@@ -3,6 +3,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include "core/film_model.hpp"
 #include "metal/metal_renderer.h"
 #include "ofxCore.h"
 
@@ -58,4 +59,18 @@ TEST_CASE("Info.plist present") {
     const std::string path = kBundle + "/Contents/Info.plist";
     REQUIRE(exists(path));
     CHECK(readFile(path).find("OpenFilm.ofx") != std::string::npos);
+}
+
+TEST_CASE("bundle ships film resources") {
+    const std::string res = kBundle + "/Contents/Resources";
+    CHECK(exists(res + "/data/stocks/kodak-5219-type.json"));
+    CHECK(exists(res + "/data/stocks/kodak-2383-type.json"));
+    CHECK(exists(res + "/data/spectral/iso5_3_status_m.csv"));
+    CHECK(exists(res + "/rec2020.coeff"));
+}
+
+TEST_CASE("film resources load from the bundle") {
+    const auto r = openfilm::FilmResources::load(kBundle + "/Contents/Resources");
+    REQUIRE(r != nullptr);
+    CHECK(r->stocks.size() == 2);
 }

@@ -226,3 +226,14 @@ TEST_CASE("concurrent cache use") {
   for (auto& th : pool) th.join();
   CHECK(bad == 0);
 }
+
+TEST_CASE("non-finite exposure is treated as zero stops") {
+    const auto film = cache().get(params());
+    TestImage src(tight(0, 0, 2, 1), 0.4f), ref(tight(0, 0, 2, 1), 0.f), bad(tight(0, 0, 2, 1), 0.f);
+    const RenderWindow win{0, 0, 2, 1};
+    renderFilmCpu(src.cview(), ref.view(), win, *film, 0.0);
+    for (double v : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        renderFilmCpu(src.cview(), bad.view(), win, *film, v);
+        for (int c = 0; c < 3; ++c) CHECK(bad.at(0, 0)[c] == ref.at(0, 0)[c]);
+    }
+}

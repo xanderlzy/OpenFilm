@@ -13,19 +13,34 @@
 #include "ofxsImageEffect.h"
 
 #include "core/cpu_renderer.hpp"
+#include "core/film_renderer.hpp"
+#include "core/lut.hpp"
 #include "metal/metal_renderer.h"
 
 #include <dlfcn.h>
 
+#include <algorithm>
+#include <exception>
+#include <stdexcept>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
 constexpr const char* kPluginIdentifier = "org.openfilm.OpenFilm";
 constexpr const char* kPluginName = "OpenFilm";
+constexpr const char* kParamColourGroup = "colour";
+constexpr const char* kParamInputSpace = "inputSpace";
+constexpr const char* kParamOutputSpace = "outputSpace";
+constexpr const char* kParamGamutCompression = "gamutCompression";
 constexpr const char* kParamNegativeGroup = "negative";
+constexpr const char* kParamNegativeStock = "negativeStock";
 constexpr const char* kParamExposure = "exposure";
+constexpr const char* kParamPrintGroup = "print";
+constexpr const char* kParamPrintStock = "printStock";
+constexpr const char* kParamPrinterLight[3] = {"printerLightR", "printerLightG", "printerLightB"};
+constexpr const char* kParamPrintDensity = "printDensity";
 
 // Path of this bundle's Resources folder, found from where the plugin binary was loaded:
 // .../OpenFilm.ofx.bundle/Contents/MacOS/OpenFilm.ofx -> .../OpenFilm.ofx.bundle/Contents/Resources
@@ -45,6 +60,33 @@ openfilm::MetalRenderer& metalRenderer() {
     return renderer;
 }
 
+// Film data (stocks, spectral tables) is read once per process. On failure `error` says why and
+// `resources` stays null, so the plugin can describe itself and report the problem on render.
+struct LoadedFilm {
+    std::shared_ptr<const openfilm::FilmResources> resources;
+    std::string error;
+    std::unique_ptr<openfilm::FilmCache> cache;
+    std::vector<const openfilm::Stock*> negatives, prints;  // choice index -> stock (id order)
+};
+
+const LoadedFilm& loadedFilm() {
+    static const LoadedFilm film = [] {
+        LoadedFilm f;
+        try {
+            f.resources = openfilm::FilmResources::load(bundleResourcesDir());
+            f.cache = std::make_unique<openfilm::FilmCache>(f.resources);
+            for (const auto& st : f.resources->stocks)
+                (st.type == openfilm::StockType::Negative ? f.negatives : f.prints).push_back(&st);
+            if (f.negatives.empty() || f.prints.empty()) throw std::runtime_error("no negative or print stock found");
+        } catch (const std::exception& e) {
+            f = LoadedFilm{};
+            f.error = e.what();
+        }
+        return f;
+    }();
+    return film;
+}
+
 openfilm::ImageGeometry geometryOf(const OFX::Image& img) {
     const OfxRectI b = img.getBounds();
     return {b.x1, b.y1, b.x2, b.y2, std::ptrdiff_t(img.getRowBytes())};
@@ -60,6 +102,11 @@ public:
         dstClip_ = fetchClip(kOfxImageEffectOutputClipName);
         srcClip_ = fetchClip(kOfxImageEffectSimpleSourceClipName);
         exposure_ = fetchDoubleParam(kParamExposure);
+        gamutCompression_ = fetchDoubleParam(kParamGamutCompression);
+        negativeStock_ = fetchChoiceParam(kParamNegativeStock);
+        printStock_ = fetchChoiceParam(kParamPrintStock);
+        for (int i = 0; i < 3; ++i) printerLight_[i] = fetchDoubleParam(kParamPrinterLight[i]);
+        printDensity_ = fetchDoubleParam(kParamPrintDensity);
     }
 
     void render(const OFX::RenderArguments& args) override {
@@ -72,11 +119,13 @@ public:
         const openfilm::ImageGeometry dstGeom = geometryOf(*dst);
         const openfilm::RenderWindow win{args.renderWindow.x1, args.renderWindow.y1, args.renderWindow.x2,
                                          args.renderWindow.y2};
-        openfilm::RenderParams params;
-        params.exposureStops = exposure_->getValueAtTime(args.time);
+        const double exposureStops = exposure_->getValueAtTime(args.time);
 
         if (args.isEnabledMetalRender) {
-            // GPU path: getPixelData() is an id<MTLBuffer>, not CPU memory.
+            // GPU path: getPixelData() is an id<MTLBuffer>, not CPU memory. (M2 declares Metal
+            // unsupported, so Resolve should never take this branch; kept for the M3 hand-over.)
+            openfilm::RenderParams params;
+            params.exposureStops = exposureStops;
             openfilm::MetalRenderer& gpu = metalRenderer();
             if (!gpu.isValid()) {
                 setPersistentMessage(OFX::Message::eMessageError, "",
@@ -85,16 +134,49 @@ public:
             }
             if (!gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win, params))
                 OFX::throwSuiteStatusException(kOfxStatFailed);
-        } else {
-            openfilm::renderExposureCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
-                                openfilm::ImageView{static_cast<float*>(dst->getPixelData()), dstGeom}, win, params);
+            clearPersistentMessage();
+            return;
         }
+
+        const LoadedFilm& film = loadedFilm();
+        if (!film.cache) {
+            setPersistentMessage(OFX::Message::eMessageError, "",
+                                 "OpenFilm: film data failed to load: " + film.error);
+            OFX::throwSuiteStatusException(kOfxStatFailed);
+        }
+        // Choice entries are listed by display name; the model wants stock ids.
+        const auto pick = [&](const std::vector<const openfilm::Stock*>& list, OFX::ChoiceParam* p) {
+            int i = 0;
+            p->getValueAtTime(args.time, i);
+            return list[size_t(std::clamp(i, 0, int(list.size()) - 1))]->id;
+        };
+        openfilm::FilmParams fp;
+        fp.negativeId = pick(film.negatives, negativeStock_);
+        fp.printId = pick(film.prints, printStock_);
+        fp.gamutCompression = gamutCompression_->getValueAtTime(args.time);
+        for (int i = 0; i < 3; ++i) fp.printerLights[i] = printerLight_[i]->getValueAtTime(args.time);
+        fp.printDensity = printDensity_->getValueAtTime(args.time);
+        try {
+            const auto baked = film.cache->get(fp);  // re-bakes (~1.4 s) only when the look changed
+            openfilm::renderFilmCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
+                                    openfilm::ImageView{static_cast<float*>(dst->getPixelData()), dstGeom}, win,
+                                    *baked, exposureStops);
+        } catch (const std::exception& e) {
+            setPersistentMessage(OFX::Message::eMessageError, "", std::string("OpenFilm: render failed: ") + e.what());
+            OFX::throwSuiteStatusException(kOfxStatFailed);
+        }
+        clearPersistentMessage();
     }
 
 private:
     OFX::Clip* dstClip_ = nullptr;
     OFX::Clip* srcClip_ = nullptr;
     OFX::DoubleParam* exposure_ = nullptr;
+    OFX::DoubleParam* gamutCompression_ = nullptr;
+    OFX::ChoiceParam* negativeStock_ = nullptr;
+    OFX::ChoiceParam* printStock_ = nullptr;
+    OFX::DoubleParam* printerLight_[3] = {};
+    OFX::DoubleParam* printDensity_ = nullptr;
 };
 
 }  // namespace
@@ -116,7 +198,8 @@ void OpenFilmFactory::describe(OFX::ImageEffectDescriptor& desc) {
     desc.setSupportsMultiResolution(false);
     desc.setTemporalClipAccess(false);
     desc.setRenderThreadSafety(OFX::eRenderFullySafe);
-    desc.setSupportsMetalRender(true);
+    // M2 renders on the CPU only; M3 ports the film model to Metal and turns this back on.
+    desc.setSupportsMetalRender(false);
 }
 
 void OpenFilmFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::ContextEnum /*context*/) {
@@ -128,19 +211,64 @@ void OpenFilmFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::C
     dst->addSupportedComponent(OFX::ePixelComponentRGBA);
     dst->setSupportsTiles(false);
 
+    // Fills a stock drop-down with display names in id order (the same order render() maps back).
+    const LoadedFilm& film = loadedFilm();
+    const auto stockChoice = [&](const char* name, const char* label, const std::vector<const openfilm::Stock*>& list,
+                                 OFX::GroupParamDescriptor* group) {
+        OFX::ChoiceParamDescriptor* c = desc.defineChoiceParam(name);
+        c->setLabel(label);
+        if (list.empty()) c->appendOption("(stock data missing)");
+        for (const auto* st : list) c->appendOption(st->displayName);
+        c->setDefault(0);
+        c->setParent(*group);
+    };
+    const auto doubleParam = [&](const char* name, const char* label, const char* hint, double def, double lo,
+                                 double hi, double dispLo, double dispHi, double inc, OFX::GroupParamDescriptor* g) {
+        OFX::DoubleParamDescriptor* p = desc.defineDoubleParam(name);
+        p->setLabel(label);
+        p->setHint(hint);
+        p->setDefault(def);
+        p->setRange(lo, hi);
+        p->setDisplayRange(dispLo, dispHi);
+        p->setIncrement(inc);
+        p->setDoubleType(OFX::eDoubleTypePlain);
+        p->setParent(*g);
+    };
+
+    OFX::GroupParamDescriptor* colour = desc.defineGroupParam(kParamColourGroup);
+    colour->setLabel("Colour");
+    colour->setOpen(true);
+    OFX::ChoiceParamDescriptor* in = desc.defineChoiceParam(kParamInputSpace);
+    in->setLabel("Input space");
+    in->appendOption("DaVinci Wide Gamut / Intermediate");
+    in->setParent(*colour);
+    OFX::ChoiceParamDescriptor* out = desc.defineChoiceParam(kParamOutputSpace);
+    out->setLabel("Output space");
+    out->appendOption("Rec.709 Gamma 2.4");
+    out->setParent(*colour);
+    doubleParam(kParamGamutCompression, "Gamut compression",
+                "Pulls very saturated colours inside the gamut the film can reproduce (0 = off, 1 = full)", 0.5, 0.0,
+                1.0, 0.0, 1.0, 0.05, colour);
+
     OFX::GroupParamDescriptor* negative = desc.defineGroupParam(kParamNegativeGroup);
     negative->setLabel("Negative");
     negative->setOpen(true);
+    stockChoice(kParamNegativeStock, "Negative stock", film.negatives, negative);
+    doubleParam(kParamExposure, "Exposure", "Negative exposure in stops", 0.0, -10.0, 10.0, -5.0, 5.0, 0.1, negative);
 
-    OFX::DoubleParamDescriptor* exposure = desc.defineDoubleParam(kParamExposure);
-    exposure->setLabel("Exposure");
-    exposure->setHint("Negative exposure in stops");
-    exposure->setDefault(0.0);
-    exposure->setRange(-10.0, 10.0);
-    exposure->setDisplayRange(-5.0, 5.0);
-    exposure->setIncrement(0.1);
-    exposure->setDoubleType(OFX::eDoubleTypePlain);
-    exposure->setParent(*negative);
+    OFX::GroupParamDescriptor* print = desc.defineGroupParam(kParamPrintGroup);
+    print->setLabel("Print");
+    print->setOpen(true);
+    stockChoice(kParamPrintStock, "Print stock", film.prints, print);
+    static const char* kLightLabel[3] = {"Printer light R", "Printer light G", "Printer light B"};
+    for (int i = 0; i < 3; ++i)
+        doubleParam(kParamPrinterLight[i], kLightLabel[i],
+                    "Printer points (0.025 log E each). More light in a channel puts more of the complementary dye "
+                    "in the print.",
+                    0.0, -20.0, 20.0, -20.0, 20.0, 1.0, print);
+    doubleParam(kParamPrintDensity, "Print density",
+                "Printer points added to all three lights; more light = denser, darker print", 0.0, -20.0, 20.0, -20.0, 20.0,
+                1.0, print);
 }
 
 OFX::ImageEffect* OpenFilmFactory::createInstance(OfxImageEffectHandle handle, OFX::ContextEnum /*context*/) {

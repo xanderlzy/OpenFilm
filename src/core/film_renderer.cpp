@@ -42,6 +42,8 @@ void renderFilmCpu(const ConstImageView& src, const ImageView& dst, const Render
                    double exposureStops) {
   const int rows = win.y2 - win.y1;
   if (rows <= 0 || win.x2 <= win.x1) return;
+  // A host can hand us NaN/inf for a keyframed value; treat it as 'no exposure change'.
+  if (!std::isfinite(exposureStops)) exposureStops = 0.0;
   const float stopsLog10 = float(exposureStops * std::log10(2.0));
   const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, rows);
   std::vector<std::thread> pool;
