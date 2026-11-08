@@ -130,20 +130,18 @@ public:
             params.exposureStops = exposureStops;
             openfilm::MetalRenderer& gpu = metalRenderer();
             if (!gpu.isValid()) {
-                setPersistentMessage(OFX::Message::eMessageError, "",
-                                     "OpenFilm: GPU shaders failed to load: " + gpu.error());
+                showError("OpenFilm: GPU shaders failed to load: " + gpu.error());
                 OFX::throwSuiteStatusException(kOfxStatFailed);
             }
             if (!gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win, params))
                 OFX::throwSuiteStatusException(kOfxStatFailed);
-            clearPersistentMessage();
+            clearError();
             return;
         }
 
         const LoadedFilm& film = loadedFilm();
         if (!film.cache) {
-            setPersistentMessage(OFX::Message::eMessageError, "",
-                                 "OpenFilm: film data failed to load: " + film.error);
+            showError("OpenFilm: film data failed to load: " + film.error);
             OFX::throwSuiteStatusException(kOfxStatFailed);
         }
         // Choice entries are listed by display name; the model wants stock ids.
@@ -166,13 +164,29 @@ public:
                                     openfilm::ImageView{static_cast<float*>(dst->getPixelData()), dstGeom}, win,
                                     *baked, exposureStops);
         } catch (const std::exception& e) {
-            setPersistentMessage(OFX::Message::eMessageError, "", std::string("OpenFilm: render failed: ") + e.what());
+            showError(std::string("OpenFilm: render failed: ") + e.what());
             OFX::throwSuiteStatusException(kOfxStatFailed);
         }
-        clearPersistentMessage();
+        clearError();
     }
 
 private:
+    // Resolve does not implement the OFX message suite's persistent messages; the Support library
+    // turns that into a kOfxStatErrUnsupported exception, which would fail an otherwise finished
+    // render (Resolve then discards the frame). Messages are best-effort, never fatal.
+    void showError(const std::string& text) noexcept {
+        try {
+            setPersistentMessage(OFX::Message::eMessageError, "", text);
+        } catch (...) {
+        }
+    }
+    void clearError() noexcept {
+        try {
+            clearPersistentMessage();
+        } catch (...) {
+        }
+    }
+
     OFX::Clip* dstClip_ = nullptr;
     OFX::Clip* srcClip_ = nullptr;
     OFX::DoubleParam* exposure_ = nullptr;
