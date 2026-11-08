@@ -71,3 +71,5 @@ target_include_directories(test_bundle PRIVATE ${OFX_DIR}/include)
 target_compile_definitions(test_bundle PRIVATE OPENFILM_BUNDLE_DIR="${OPENFILM_BUNDLE_DIR}")
 add_dependencies(test_bundle OpenFilm)
 add_test(NAME bundle COMMAND test_bundle)
+# Resolve may refuse a bundle whose signature no longer matches its contents.
+add_test(NAME bundle_signature COMMAND codesign --verify --deep --strict ${OPENFILM_BUNDLE_DIR})

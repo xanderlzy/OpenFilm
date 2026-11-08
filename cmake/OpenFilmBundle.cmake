@@ -51,13 +51,18 @@ function(openfilm_add_ofx_bundle target bundle_dir metallib metallib_target)
   target_link_options(${target} PRIVATE
     "LINKER:-exported_symbol,_OfxGetNumberOfPlugins"
     "LINKER:-exported_symbol,_OfxGetPlugin")
-  # Re-run the post-build steps (copy + sign) whenever the shaders change.
-  set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${metallib})
+  # The plist is generated outside the bundle and copied in just before signing, so editing it
+  # (or bumping the project version) can never leave a stale signature behind.
+  set(plist ${CMAKE_BINARY_DIR}/Info.plist)
+  configure_file(${CMAKE_SOURCE_DIR}/src/ofx/Info.plist.in ${plist} @ONLY)
+
+  # Re-run the post-build steps (copy + sign) whenever the shaders or the plist change.
+  set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${metallib} ${plist})
   add_dependencies(${target} ${metallib_target})
 
-  configure_file(${CMAKE_SOURCE_DIR}/src/ofx/Info.plist.in ${bundle_dir}/Contents/Info.plist @ONLY)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory ${bundle_dir}/Contents/Resources
+    COMMAND ${CMAKE_COMMAND} -E copy ${plist} ${bundle_dir}/Contents/Info.plist
     COMMAND ${CMAKE_COMMAND} -E copy ${metallib} ${bundle_dir}/Contents/Resources/
     COMMAND codesign --force --deep -s - ${bundle_dir}
     COMMENT "Assembling and signing ${bundle_dir}"
