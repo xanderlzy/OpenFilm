@@ -120,6 +120,11 @@ Xyz FilmModel::adaptedXyz(const Vec3& negStatusMDensity, const Vec3& offsets) co
 Vec3 FilmModel::negativeLogExposure(const Vec3& diCode) const { return negative_.logExposure(diCode); }
 Vec3 FilmModel::negativeDensity(const Vec3& logE) const { return negative_.density(logE); }
 
+std::array<double, 2> FilmModel::negativeLogERange(int ch) const {
+  const Curve& c = negative_.curves()[size_t(ch)];
+  return {c.minLogE(), c.maxLogE()};
+}
+
 Vec3 FilmModel::printerOffsets() const {
   Vec3 off;
   for (int j = 0; j < 3; ++j)

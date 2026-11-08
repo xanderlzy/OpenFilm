@@ -11,6 +11,6 @@ namespace openfilm {
 
 // Processes the pixels inside `win` from `src` into `dst`. Pixels of `dst` outside `win` are left
 // untouched. Where `win` reaches outside `src`, the output is transparent black (0,0,0,0).
-void renderCpu(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const RenderParams& p);
+void renderExposureCpu(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const RenderParams& p);
 
 }  // namespace openfilm

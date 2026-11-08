@@ -1,4 +1,4 @@
-// GPU version of renderCpu() (src/core/cpu_renderer.cpp). Must stay numerically identical;
+// GPU version of renderExposureCpu() (src/core/cpu_renderer.cpp). Must stay numerically identical;
 // tests/gpu/test_gpu_vs_cpu.mm checks this.
 //
 // A Metal "kernel" runs once per GPU thread. We launch one thread per pixel of the render

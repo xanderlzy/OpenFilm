@@ -52,7 +52,7 @@ Result runBoth(const ImageGeometry& sg, const ImageGeometry& dg, const RenderWin
     // CPU reference.
     std::vector<float> cpuDst(byteSize(dg) / 4, 7.f);
     RenderParams params{stops};
-    renderCpu(srcView, ImageView{cpuDst.data(), dg}, win, params);
+    renderExposureCpu(srcView, ImageView{cpuDst.data(), dg}, win, params);
 
     // GPU.
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();

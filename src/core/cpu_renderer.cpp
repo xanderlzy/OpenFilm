@@ -30,7 +30,7 @@ void renderRows(const ConstImageView& src, const ImageView& dst, const RenderWin
 
 }  // namespace
 
-void renderCpu(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const RenderParams& p) {
+void renderExposureCpu(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const RenderParams& p) {
     const int rows = win.y2 - win.y1;
     if (rows <= 0 || win.x2 <= win.x1) return;
 

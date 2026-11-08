@@ -86,7 +86,7 @@ public:
             if (!gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win, params))
                 OFX::throwSuiteStatusException(kOfxStatFailed);
         } else {
-            openfilm::renderCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
+            openfilm::renderExposureCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
                                 openfilm::ImageView{static_cast<float*>(dst->getPixelData()), dstGeom}, win, params);
         }
     }

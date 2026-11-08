@@ -48,6 +48,9 @@ class FilmModel {
   Vec3 negativeLogExposure(const Vec3& diCode) const;
   Vec3 negativeDensity(const Vec3& logE) const;
 
+  // Log E span of the negative's digitised H&D curve for layer `ch` (0 = red).
+  std::array<double, 2> negativeLogERange(int ch) const;
+
   // Negative Status M density -> Rec.709 display code.
   Vec3 printOutput(const Vec3& negStatusMDensity) const;
 

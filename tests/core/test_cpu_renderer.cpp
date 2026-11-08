@@ -53,7 +53,7 @@ void fillPattern(TestImage& img) {
 TEST_CASE("zero stops is identity") {
     TestImage src(tight(0, 0, 4, 3), 0.f), dst(tight(0, 0, 4, 3), 0.f);
     fillPattern(src);
-    renderCpu(src.cview(), dst.view(), fullWindow(src.geom), RenderParams{0.0});
+    renderExposureCpu(src.cview(), dst.view(), fullWindow(src.geom), RenderParams{0.0});
     for (int y = 0; y < 3; ++y)
         for (int x = 0; x < 4; ++x)
             for (int c = 0; c < 4; ++c) CHECK(dst.at(x, y)[c] == src.at(x, y)[c]);
@@ -62,7 +62,7 @@ TEST_CASE("zero stops is identity") {
 TEST_CASE("plus one stop doubles rgb, keeps alpha") {
     TestImage src(tight(0, 0, 1, 1), 0.f), dst(tight(0, 0, 1, 1), 0.f);
     src.set([](int, int, float* p) { p[0] = 0.25f; p[1] = 1.0f; p[2] = 3.0f; p[3] = 0.5f; });
-    renderCpu(src.cview(), dst.view(), fullWindow(src.geom), RenderParams{1.0});
+    renderExposureCpu(src.cview(), dst.view(), fullWindow(src.geom), RenderParams{1.0});
     CHECK(dst.at(0, 0)[0] == 0.5f);
     CHECK(dst.at(0, 0)[1] == 2.0f);
     CHECK(dst.at(0, 0)[2] == 6.0f);
@@ -71,7 +71,7 @@ TEST_CASE("plus one stop doubles rgb, keeps alpha") {
 
 TEST_CASE("minus two stops quarters rgb") {
     TestImage src(tight(0, 0, 1, 1), 1.f), dst(tight(0, 0, 1, 1), 0.f);
-    renderCpu(src.cview(), dst.view(), fullWindow(src.geom), RenderParams{-2.0});
+    renderExposureCpu(src.cview(), dst.view(), fullWindow(src.geom), RenderParams{-2.0});
     CHECK(dst.at(0, 0)[0] == 0.25f);
     CHECK(dst.at(0, 0)[1] == 0.25f);
     CHECK(dst.at(0, 0)[2] == 0.25f);
@@ -81,7 +81,7 @@ TEST_CASE("minus two stops quarters rgb") {
 TEST_CASE("only render window is written") {
     TestImage src(tight(0, 0, 4, 3), 1.f), dst(tight(0, 0, 4, 3), 7.f);
     RenderWindow win{1, 1, 3, 2};
-    renderCpu(src.cview(), dst.view(), win, RenderParams{1.0});
+    renderExposureCpu(src.cview(), dst.view(), win, RenderParams{1.0});
     for (int y = 0; y < 3; ++y)
         for (int x = 0; x < 4; ++x) {
             bool inside = x >= 1 && x < 3 && y >= 1 && y < 2;
@@ -102,7 +102,7 @@ TEST_CASE("non-zero bounds origin and padded rows") {
         p[2] = float(x + y);
         p[3] = 0.5f;
     });
-    renderCpu(src.cview(), dst.view(), fullWindow(sg), RenderParams{1.0});
+    renderExposureCpu(src.cview(), dst.view(), fullWindow(sg), RenderParams{1.0});
     for (int y = 50; y < 53; ++y)
         for (int x = 100; x < 104; ++x) {
             const float* d = dst.at(x, y);

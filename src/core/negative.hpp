@@ -26,6 +26,9 @@ class NegativeModel {
   // Spectral density of the dye stack (plus base) that reads as `statusMDensity`.
   Spectrum transmittanceDensity(const Vec3& statusMDensity) const;
 
+  // The stock's characteristic curves (used to size baked 1D curves).
+  const std::array<Curve, 3>& curves() const { return stock_.curve; }
+
  private:
   Stock stock_;
   const SpectralTables& tables_;
