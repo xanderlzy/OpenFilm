@@ -6,8 +6,8 @@
 
 namespace openfilm {
 
-Lut3D::Lut3D(int size, Vec3 domainMin, Vec3 domainMax)
-    : size_(size), min_(domainMin), max_(domainMax), data_(size_t(size) * size * size * 3, 0.f) {}
+Lut3D::Lut3D(int size, Vec3 domainMin, Vec3 domainMax, bool denseDarks)
+    : size_(size), min_(domainMin), max_(domainMax), denseDarks_(denseDarks), data_(size_t(size) * size * size * 3, 0.f) {}
 
 void Lut3D::bake(const std::function<Vec3(const Vec3&)>& f) {
   const int n = size_;
@@ -17,7 +17,11 @@ void Lut3D::bake(const std::function<Vec3(const Vec3&)>& f) {
         for (int r = 0; r < n; ++r) {
           const int idx[3] = {r, g, b};
           Vec3 in;
-          for (int k = 0; k < 3; ++k) in[k] = min_[k] + (max_[k] - min_[k]) * double(idx[k]) / double(n - 1);
+          for (int k = 0; k < 3; ++k) {
+            double t = double(idx[k]) / double(n - 1);
+            if (denseDarks_) t *= t;  // nodes bunch up near the domain minimum
+            in[k] = min_[k] + (max_[k] - min_[k]) * t;
+          }
           const Vec3 out = f(in);
           float* dst = &data_[((size_t(b) * n + g) * n + r) * 3];
           for (int k = 0; k < 3; ++k) dst[k] = float(out[k]);
@@ -35,9 +39,10 @@ std::array<float, 3> Lut3D::lookup(float a, float b, float c) const {
   int i0[3];
   float f[3];
   for (int k = 0; k < 3; ++k) {
-    float u = (in[k] - float(min_[k])) / float(max_[k] - min_[k]) * float(n - 1);
-    u = std::clamp(u, 0.f, float(n - 1));  // also maps NaN to a valid cell (comparisons are false)
-    if (!(u == u)) u = 0.f;
+    float t = std::clamp((in[k] - float(min_[k])) / float(max_[k] - min_[k]), 0.f, 1.f);  // NaN fails both compares
+    if (!(t == t)) t = 0.f;
+    if (denseDarks_) t = std::sqrt(t);  // inverse of the node spacing used in bake()
+    const float u = t * float(n - 1);
     int i = std::min(int(u), n - 2);
     i0[k] = i;
     f[k] = u - float(i);
@@ -69,13 +74,24 @@ float Curve1D::eval(float x) const {
 }
 
 std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, int lutSizeP) {
-  Lut3D lutE(lutSizeE, {0, 0, 0}, {1, 1, 1});
-  lutE.bake([&](const Vec3& di) { return model.negativeLogExposure(di); });
+  Lut3D lutE(lutSizeE, {0, 0, 0}, {1, 1, 1}, true);
+  // What the table stores matters. Raw log E is wrong near black: the black corner sits at the
+  // 1e-10 floor (log E -10), and interpolating toward it pulls dark pixels far below the toe once
+  // exposure is added afterwards. Raw linear E is exact in the shadows but too coarse in the
+  // highlights. So store log10(E + eps): it is linear in E below eps (smooth into black, floor
+  // fades away) and logarithmic above. The renderer undoes it with 10^q - eps. The nodes are also
+  // packed toward black (dense darks), because saturated dark colours bend fastest there.
+  lutE.bake([&](const Vec3& di) {
+    const Vec3 logE = model.negativeLogExposure(di);
+    Vec3 q;
+    for (size_t c = 0; c < 3; ++c) q[c] = std::log10(std::pow(10.0, logE[c]) + kExposureLutEps);
+    return q;
+  });
 
   std::array<Curve1D, 3> curves;
   constexpr int kCurveSamples = 4096;
   for (int c = 0; c < 3; ++c) {
-    // One stop of headroom each side so exposure shifts reach the toe and shoulder plateaus.
+    // One log E (about 3.3 stops) of headroom each side so exposure shifts reach the toe and shoulder plateaus.
     const auto range = model.negativeLogERange(c);
     Curve1D& cv = curves[size_t(c)];
     cv.min = float(range[0] - 1);
@@ -106,16 +122,39 @@ FilmCache::FilmCache(std::shared_ptr<const FilmResources> resources) : res_(std:
 
 std::shared_ptr<const BakedFilm> FilmCache::get(const FilmParams& params) {
   const uint64_t key = params.hash();
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (size_t i = 0; i < entries_.size(); ++i) {
-    if (entries_[i].first != key) continue;
-    std::rotate(entries_.begin(), entries_.begin() + long(i), entries_.begin() + long(i) + 1);  // now most recent
-    return entries_.front().second;
+  std::promise<std::shared_ptr<const BakedFilm>> promise;
+  Future future;
+  bool isBaker = false;
+  {
+    // The lock only guards the bookkeeping; the ~1 s bake below runs without it, so renders of
+    // looks that are already cached never wait on someone else's bake.
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t i = 0; i < entries_.size(); ++i) {
+      if (entries_[i].first != key) continue;
+      std::rotate(entries_.begin(), entries_.begin() + long(i), entries_.begin() + long(i) + 1);  // now most recent
+      future = entries_.front().second;
+      break;
+    }
+    if (!future.valid()) {
+      // First request for this look: publish a future so a second request for the same look waits
+      // on this bake instead of starting its own.
+      future = promise.get_future().share();
+      entries_.insert(entries_.begin(), {key, future});
+      if (entries_.size() > 4) entries_.pop_back();
+      isBaker = true;
+    }
   }
-  auto baked = bakeFilm(FilmModel(res_, params));
-  entries_.insert(entries_.begin(), {key, baked});
-  if (entries_.size() > 4) entries_.pop_back();
-  return baked;
+  if (!isBaker) return future.get();
+  try {
+    promise.set_value(bakeFilm(FilmModel(res_, params)));
+  } catch (...) {
+    // Waiters get the exception; forget the look so the next request tries again.
+    promise.set_exception(std::current_exception());
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [&](const auto& e) { return e.first == key; }),
+                   entries_.end());
+  }
+  return future.get();
 }
 
 }  // namespace openfilm

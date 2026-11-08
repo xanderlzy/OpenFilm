@@ -45,8 +45,8 @@ add_custom_target(openfilm_coeff DEPENDS ${OPENFILM_COEFF})
 
 # --- Resources: everything the film model reads at run time, staged for the bundle -------------
 # Layout matches FilmResources::load(): <resources>/data/spectral, <resources>/data/stocks, rec2020.coeff.
-file(GLOB OPENFILM_SPECTRAL_CSV ${CMAKE_SOURCE_DIR}/data/spectral/*.csv)
-file(GLOB OPENFILM_STOCK_JSON ${CMAKE_SOURCE_DIR}/data/stocks/*.json)
+file(GLOB OPENFILM_SPECTRAL_CSV CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/data/spectral/*.csv)
+file(GLOB OPENFILM_STOCK_JSON CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/data/stocks/*.json)
 set(OPENFILM_RESOURCES_STAMP ${CMAKE_BINARY_DIR}/resources/.stamp)
 add_custom_command(
   OUTPUT ${OPENFILM_RESOURCES_STAMP}
@@ -58,6 +58,7 @@ add_custom_command(
   COMMENT "Staging film resources"
   VERBATIM)
 add_custom_target(openfilm_resources DEPENDS ${OPENFILM_RESOURCES_STAMP})
+add_dependencies(openfilm_resources openfilm_coeff)  # the stamp rule reads the coeff file, so build it first
 
 # --- Core: plain C++ film maths, no OFX or Apple dependencies ---------------
 add_library(openfilm_core STATIC src/core/cpu_renderer.cpp src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp src/core/negative.cpp src/core/print.cpp src/core/film_model.cpp src/core/lut.cpp src/core/film_renderer.cpp)

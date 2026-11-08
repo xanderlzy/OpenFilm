@@ -13,8 +13,8 @@ projector → screen.**
    Intermediate. Mid-grey (18 %) sits at the usual DI code value. The only input choice today is
    DWG/Intermediate.
 2. **Gamut compression.** DWG can describe colours no light source can produce (neon, deep LED
-   blue). Those are pulled smoothly back to where a real light could sit before anything else
-   happens. See the *Gamut compression* control.
+   blue). Those are pulled smoothly back to the Rec.2020 boundary (the widest set of colours a real
+   light source can approach) before anything else happens. See the *Gamut compression* control.
 3. **Scene light as a spectrum.** Each pixel's colour is turned into a plausible full spectrum
    (380-780 nm, every 5 nm), because film responds to wavelengths, not to RGB. A spectrum has to be
    invented from three numbers, so OpenFilm uses a published smooth-spectrum method (Jakob and
@@ -74,12 +74,17 @@ M2 runs entirely on the CPU. Resolve's GPU (Metal) path is switched off for this
 so expect slow scrubbing and playback; this is a look-development build.
 
 To keep each frame manageable, the spectral maths is pre-computed ("baked") into lookup tables:
-a 113 x 113 x 113 table for the negative (DI code to log exposure) and a 97 x 97 x 97 table for the
+a 113 x 113 x 113 table for the negative (DI code to exposure) and a 97 x 97 x 97 table for the
 print (negative density to display code). The sizes were chosen so the tables agree with the full
-spectral calculation to within about 0.4 dE2000. Building them takes about **1.4 s**, and happens
+spectral calculation to within 0.4 dE2000 (measured worst case 0.38 over 2000 random colours and
+Exposure from -5 to +5 stops, the range the slider shows; 0.34 for deep shadows pushed the same
+amount). Exposure beyond +/-5 stops is still correct in the midtones and highlights but is not
+checked as tightly in the deepest shadows. Building them takes about **1.4 s**, and happens
 whenever the printer lights, print density, stocks or gamut compression change. Exposure never
-re-bakes, so it is the control to ride while playing. The last four looks are cached, so dragging
-a slider back to an earlier value is instant.
+re-bakes, so it is the control to ride while playing. The last four looks are cached, so returning
+to one of them (the same exact settings) is instant. A slider drag passes through many new looks,
+and each one is a fresh bake; while one bakes, frames that use an already-baked look keep
+rendering.
 
 ## Where the stock data comes from
 
@@ -119,4 +124,20 @@ review images generated in `build/digitize-review/`.
   density.
 * **Dye and base spectra beyond the digitised range** (below 400 nm and above 750 nm or so) are held
   flat at their end values.
+* **2383 UV-sensitivity branches excluded.** The print stock's sensitivity below about 400 nm
+  (the 372-399 nm branches on the datasheet) is not modelled; the Wratten-2B-style cut stands in
+  for it.
+* **No print D-min or base spectrum.** The print is modelled as dye density only; the clear
+  base and fog of the real print film are not added.
 * **No halation, bloom or grain** yet; those come in later milestones.
+
+## Glossary
+
+* **H&D curve** (Hurter and Driffield): a film layer's characteristic curve, plotting the density
+  it develops to against the log of the exposure it received.
+* **dE2000 (Delta E 2000):** the CIE's measure of how different two colours look; about 1 is a
+  just-noticeable difference.
+* **u'v':** a chromaticity coordinate system (CIE 1976) where equal distances look roughly equally
+  different; used here to measure how neutral a grey is.
+* **Bradford:** the standard method for adjusting colours from one white point to another (here
+  D55 to D65).

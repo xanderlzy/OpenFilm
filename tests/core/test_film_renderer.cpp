@@ -114,7 +114,7 @@ TEST_CASE("baked matches direct within DeltaE2000 0.5") {
   std::printf("bake default sizes: %.2f s\n", bakeSec);
 
   std::mt19937 rng(11);
-  std::uniform_real_distribution<double> u(0, 1), ue(-3, 3);
+  std::uniform_real_distribution<double> u(0, 1), ue(-5, 5);  // the plugin's displayed Exposure range
   double maxDe = 0;
   std::vector<double> all;
   Vec3 worstIn{}, worstDirect{}, worstBaked{};
@@ -136,6 +136,33 @@ TEST_CASE("baked matches direct within DeltaE2000 0.5") {
               all[all.size() * 99 / 100], all[all.size() * 999 / 1000],
               int(std::count_if(all.begin(), all.end(), [](double d) { return d > 0.5; })), all.size());
   CHECK(maxDe < 0.5);
+}
+
+TEST_CASE("baked matches direct in the deep shadows with exposure pushed") {
+  // Dark DI codes on every channel, +-5 stops: this is where the toe of the negative lives and where
+  // an exposure table that interpolates toward the black corner goes badly wrong.
+  const FilmModel model(res(), params());
+  const auto film = cache().get(params());
+  std::mt19937 rng(23);
+  std::uniform_real_distribution<double> u(0, 0.05), ue(-5, 5);
+  double maxDe = 0, maxGrey = 0;
+  for (int i = 0; i < 3000; ++i) {
+    const Vec3 in{u(rng), u(rng), u(rng)};
+    const double stops = ue(rng);
+    const double de = deltaE2000(toLab(model.evaluate(in, stops)),
+                                 toLab(renderOne(*film, float(in[0]), float(in[1]), float(in[2]), stops)));
+    maxDe = std::max(maxDe, de);
+  }
+  for (int i = 0; i <= 60; ++i)
+    for (double stops : {-5.0, -2.0, 0.0, 2.0, 4.0, 5.0}) {
+      const double v = 0.03 * i / 60;  // neutral ramp from black to DI 0.03
+      const Vec3 in{v, v, v};
+      maxGrey = std::max(maxGrey, deltaE2000(toLab(model.evaluate(in, stops)),
+                                             toLab(renderOne(*film, float(v), float(v), float(v), stops))));
+    }
+  std::printf("dark random max dE2000 %.4f, dark grey ramp max %.4f\n", maxDe, maxGrey);
+  CHECK(maxDe < 0.5);
+  CHECK(maxGrey < 0.5);
 }
 
 TEST_CASE("baked tables are finite and prints are non-negative") {
@@ -194,6 +221,9 @@ TEST_CASE("out-of-domain and non-finite inputs") {
     const Vec3 o = renderOne(*film, v, v, v, 0);
     for (double c : o) CHECK(std::isfinite(c));
   }
+  const Vec3 one = renderOne(*film, 1.0f, 1.0f, 1.0f, 0);
+  const Vec3 over = renderOne(*film, 1.7f, 1.7f, 1.7f, 0);
+  for (int c = 0; c < 3; ++c) CHECK(over[c] == one[c]);  // clamped to the edge of the domain
   const Vec3 neg = renderOne(*film, -0.5f, -0.5f, -0.5f, 0);
   for (int c = 0; c < 3; ++c) CHECK(neg[c] == zero[c]);
   const Vec3 bad = renderOne(*film, nan, inf, -inf, 0);
@@ -236,4 +266,41 @@ TEST_CASE("non-finite exposure is treated as zero stops") {
         renderFilmCpu(src.cview(), bad.view(), win, *film, v);
         for (int c = 0; c < 3; ++c) CHECK(bad.at(0, 0)[c] == ref.at(0, 0)[c]);
     }
+}
+
+TEST_CASE("a bake does not stall renders of an already-cached look") {
+  FilmCache c(res());
+  c.get(params(0));  // look B, cached
+  std::atomic<bool> started{false};
+  std::thread baker([&] {
+    started = true;
+    c.get(params(3));  // look A: a fresh ~1 s bake
+  });
+  while (!started) std::this_thread::yield();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));  // A is well into its bake
+  const auto t0 = std::chrono::steady_clock::now();
+  c.get(params(0));
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("cached get while another look bakes: %.2f ms\n", ms);
+  baker.join();
+  CHECK(ms < 100.0);
+}
+
+TEST_CASE("simultaneous requests for one new look bake it once") {
+  FilmCache c(res());
+  std::shared_ptr<const BakedFilm> a, b;
+  std::thread t1([&] { a = c.get(params(2)); }), t2([&] { b = c.get(params(2)); });
+  t1.join();
+  t2.join();
+  CHECK(a);
+  CHECK(a == b);
+}
+
+TEST_CASE("a failed bake reaches the caller and is not cached") {
+  FilmCache c(res());
+  FilmParams bad = params();
+  bad.negativeId = "no-such-stock";
+  CHECK_THROWS(c.get(bad));
+  CHECK_THROWS(c.get(bad));  // retried, not a remembered failure
+  CHECK(c.get(params()) != nullptr);  // the cache still works afterwards
 }

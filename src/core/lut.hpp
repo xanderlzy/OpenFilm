@@ -1,11 +1,12 @@
 // Baked film: the slow spectral model is sampled once into small tables so the per-pixel work is
-// a few table lookups. Three stages: LUT_E (DI code -> log exposure), three 1D curves (log
+// a few table lookups. Three stages: LUT_E (DI code -> exposure, stored as log10(E + eps)), three 1D curves (log
 // exposure -> negative density, where exposure in stops is applied), LUT_P (negative density ->
 // display code, where the printer lights live).
 #pragma once
 
 #include <array>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -17,7 +18,10 @@ namespace openfilm {
 // A cube of RGB samples with tetrahedral interpolation (the same scheme Resolve's own LUTs use).
 class Lut3D {
  public:
-  Lut3D(int size, Vec3 domainMin, Vec3 domainMax);
+  // denseDarks spaces the nodes as t^2 (t = 0..1 across the domain) so the cells next to the domain
+  // minimum are narrow; the exposure table needs that because deep shadows are where the colour
+  // model bends fastest, and exposure can push them up the toe of the negative.
+  Lut3D(int size, Vec3 domainMin, Vec3 domainMax, bool denseDarks = false);
 
   // Samples f at every node; slices are spread over the CPU cores, so f must be thread-safe.
   void bake(const std::function<Vec3(const Vec3&)>& f);
@@ -27,11 +31,13 @@ class Lut3D {
 
   int size() const { return size_; }
   // RGB interleaved, red index fastest: ((b * N + g) * N + r) * 3. This is the layout M3 uploads.
+  // Node i sits at domain position (i/(N-1))^2 when denseDarks is set, else i/(N-1).
   const std::vector<float>& data() const { return data_; }
 
  private:
   int size_;
   Vec3 min_, max_;
+  bool denseDarks_;
   std::vector<float> data_;
 };
 
@@ -42,8 +48,11 @@ struct Curve1D {
   float eval(float x) const;
 };
 
+// Offset inside the exposure table's log; see bakeFilm().
+constexpr double kExposureLutEps = 1e-3;
+
 struct BakedFilm {
-  Lut3D lutE;                       // DI [0,1]^3 -> log E
+  Lut3D lutE;                       // DI [0,1]^3 -> log10(E + kExposureLutEps), E = 10^logE
   std::array<Curve1D, 3> negCurves;  // log E over [curve min - 1, curve max + 1] -> Status M density
   Lut3D lutP;                       // reachable negative density (per-channel domain) -> display code
 };
@@ -52,7 +61,9 @@ struct BakedFilm {
 // 0.4 dE2000 on 2000 random look-ups; 65^3 reached 0.65. Holds no reference to `model` afterwards.
 std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE = 113, int lutSizeP = 97);
 
-// Keeps the last 4 looks so dragging a slider back and forth does not rebake. Exposure is not
+// Keeps the last 4 looks so returning to a recent look does not rebake. A bake runs outside the
+// lock and is shared: other threads asking for the same new look wait for it, while threads asking
+// for an already-baked look are never blocked. A failed bake is thrown to all its waiters, then forgotten. Exposure is not
 // part of FilmParams (it is applied between the LUTs), so changing it never misses the cache.
 class FilmCache {
  public:
@@ -61,8 +72,9 @@ class FilmCache {
 
  private:
   std::shared_ptr<const FilmResources> res_;
+  using Future = std::shared_future<std::shared_ptr<const BakedFilm>>;
   std::mutex mutex_;
-  std::vector<std::pair<uint64_t, std::shared_ptr<const BakedFilm>>> entries_;  // most recent first
+  std::vector<std::pair<uint64_t, Future>> entries_;  // most recent first; a look may still be baking
 };
 
 }  // namespace openfilm

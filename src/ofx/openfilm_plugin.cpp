@@ -10,6 +10,8 @@
 //     either as CPU memory or (with Metal on) as GPU buffers. We forward to the matching renderer.
 //
 // All film maths lives in src/core (CPU) and src/metal (GPU). This file only translates OFX.
+#include <cmath>
+
 #include "ofxsImageEffect.h"
 
 #include "core/cpu_renderer.hpp"
@@ -154,8 +156,10 @@ public:
         fp.negativeId = pick(film.negatives, negativeStock_);
         fp.printId = pick(film.prints, printStock_);
         fp.gamutCompression = gamutCompression_->getValueAtTime(args.time);
-        for (int i = 0; i < 3; ++i) fp.printerLights[i] = printerLight_[i]->getValueAtTime(args.time);
-        fp.printDensity = printDensity_->getValueAtTime(args.time);
+        // A keyframed NaN/inf would poison the whole print table; treat it as 0 like exposure.
+        auto finiteOrZero = [](double v) { return std::isfinite(v) ? v : 0.0; };
+        for (int i = 0; i < 3; ++i) fp.printerLights[i] = finiteOrZero(printerLight_[i]->getValueAtTime(args.time));
+        fp.printDensity = finiteOrZero(printDensity_->getValueAtTime(args.time));
         try {
             const auto baked = film.cache->get(fp);  // re-bakes (~1.4 s) only when the look changed
             openfilm::renderFilmCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
@@ -247,7 +251,7 @@ void OpenFilmFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::C
     out->appendOption("Rec.709 Gamma 2.4");
     out->setParent(*colour);
     doubleParam(kParamGamutCompression, "Gamut compression",
-                "Pulls very saturated colours inside the gamut the film can reproduce (0 = off, 1 = full)", 0.5, 0.0,
+                "Pulls very saturated colours inside the gamut the film can reproduce (0 = hard clip at the gamut edge, 1 = full soft compression)", 0.5, 0.0,
                 1.0, 0.0, 1.0, 0.05, colour);
 
     OFX::GroupParamDescriptor* negative = desc.defineGroupParam(kParamNegativeGroup);
