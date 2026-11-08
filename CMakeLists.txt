@@ -24,12 +24,28 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_MakeAvailable(doctest)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
 
+# --- Jakob-Hanika table: Rec.2020 RGB -> spectrum coefficients, built once ----
+# The optimiser takes a minute or so, so it only reruns when the tool itself changes.
+add_executable(rgb2spec_opt tools/rgb2spec/rgb2spec_opt.cpp)
+target_compile_options(rgb2spec_opt PRIVATE -O3 -w)  # vendored code: speed matters, warnings don't
+set(OPENFILM_COEFF ${CMAKE_BINARY_DIR}/resources/rec2020.coeff)
+add_custom_command(
+  OUTPUT ${OPENFILM_COEFF}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/resources
+  COMMAND rgb2spec_opt 64 ${OPENFILM_COEFF} REC2020
+  DEPENDS rgb2spec_opt
+  COMMENT "Generating Rec.2020 RGB-to-spectrum table"
+  VERBATIM)
+add_custom_target(openfilm_coeff DEPENDS ${OPENFILM_COEFF})
+
 # --- Core: plain C++ film maths, no OFX or Apple dependencies ---------------
-add_library(openfilm_core STATIC src/core/cpu_renderer.cpp src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp)
+add_library(openfilm_core STATIC src/core/cpu_renderer.cpp src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp)
 target_include_directories(openfilm_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 
-add_executable(test_core tests/core/test_cpu_renderer.cpp tests/core/test_spectral.cpp tests/core/test_color.cpp tests/core/test_gamut.cpp)
-target_compile_definitions(test_core PRIVATE OPENFILM_SOURCE_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
+add_executable(test_core tests/core/test_cpu_renderer.cpp tests/core/test_spectral.cpp tests/core/test_color.cpp tests/core/test_gamut.cpp tests/core/test_rgb2spec.cpp)
+target_compile_definitions(test_core PRIVATE OPENFILM_SOURCE_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+  OPENFILM_COEFF_PATH="${OPENFILM_COEFF}")
+add_dependencies(test_core openfilm_coeff)
 target_link_libraries(test_core PRIVATE openfilm_core doctest::doctest_with_main)
 add_test(NAME core COMMAND test_core)
 
