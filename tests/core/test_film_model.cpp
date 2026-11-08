@@ -61,13 +61,18 @@ TEST_CASE("print density moves all three") {
 }
 
 TEST_CASE("grey ramp neutral and monotonic") {
+  // Controller ruling (replaces the spec's 0.003): u'v' distance < 0.008 within +-1 stop and
+  // < 0.012 within +-2 stops. What is left after the UV and edge-held density fixes is attributed
+  // to unmodelled printer optics (heat-absorbing glass) and datasheet digitising tolerance
+  // (~0.02 D per channel); to be revisited in the M7 fidelity report.
   const FilmModel m(res(), params());
   double worst = 0;
   for (int q = -8; q <= 8; ++q) {
     const double stops = q * 0.25;
     const double d = dUv(m.evaluate(grey(0.18), stops));
     worst = std::max(worst, d);
-    CHECK(d < 0.003);
+    if (q % 4 == 0) std::printf("stops %+.0f du'v' %.5f\n", stops, d);
+    CHECK(d < (std::abs(stops) <= 1.0 ? 0.008 : 0.012));
   }
   std::printf("worst du'v' within +-2 stops: %.5f\n", worst);
   Vec3 prev{-1, -1, -1};

@@ -68,6 +68,16 @@ struct Ctx {
   }
 };
 
+// Density spectra (dyes, base) are held at their first/last digitised value outside the chart's
+// wavelength range. Zero would mean perfectly clear film, which wrongly lets UV through a negative
+// that is really dyed there. Sensitivities and filters are different: no data means no response.
+std::vector<std::array<double, 2>> holdEdges(std::vector<std::array<double, 2>> pts) {
+  const double lastNm = wavelength(kSpectralSamples - 1);
+  if (pts.front()[0] > kLambdaMin) pts.insert(pts.begin(), {kLambdaMin, pts.front()[1]});
+  if (pts.back()[0] < lastNm) pts.push_back({lastNm, pts.back()[1]});
+  return pts;
+}
+
 }  // namespace
 
 Stock loadStock(const std::string& path) {
@@ -128,10 +138,10 @@ Stock loadStock(const std::string& path) {
   const char* dyeNames[3] = {"cyan", "magenta", "yellow"};
   for (int i = 0; i < 3; ++i) {
     const std::string where = std::string("dyeDensity.") + dyeNames[i];
-    s.dye[i] = resample(c.pairs(c.field(dyes, dyeNames[i], "dyeDensity."), where), 0.0);
+    s.dye[i] = resample(holdEdges(c.pairs(c.field(dyes, dyeNames[i], "dyeDensity."), where)), 0.0);
   }
   s.base.fill(0.0);
-  if (j.contains("baseDensity")) s.base = resample(c.pairs(j["baseDensity"], "baseDensity"), 0.0);
+  if (j.contains("baseDensity")) s.base = resample(holdEdges(c.pairs(j["baseDensity"], "baseDensity")), 0.0);
   return s;
 }
 

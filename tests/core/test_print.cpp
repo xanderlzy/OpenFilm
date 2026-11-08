@@ -46,3 +46,14 @@ TEST_CASE("print density reads back from the curves") {
   const Vec3 d = m.printDensity({-1, -1, -1});
   for (int j = 0; j < 3; ++j) CHECK(d[j] == doctest::Approx(fx().print.curve[j].eval(-1)));
 }
+
+TEST_CASE("printer lamp has a Wratten 2B-style UV cut") {
+  // Kodak's 2383 data sheet calls for a UV-absorbing filter (Wratten 2B) in the printer light.
+  const Spectrum raw = blackbody(3200.0);
+  const Spectrum lamp = fx().model().lamp();
+  for (int i = 0; i < kSpectralSamples; ++i) {
+    const double nm = wavelength(i);
+    if (nm <= 385) CHECK(lamp[i] <= 0.02 * raw[i]);
+    if (nm >= 420) CHECK(lamp[i] == doctest::Approx(raw[i]));
+  }
+}

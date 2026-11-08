@@ -55,6 +55,7 @@ class FilmModel {
   Vec3 evaluate(const Vec3& diCode, double exposureStops) const;
 
   // Log E offsets applied to the print layers: auto-balance plus the user's printer points.
+  // Exposed for tests and diagnostics.
   Vec3 printerOffsets() const;
   const Vec3& balance() const { return balance_; }
   double anchorScale() const { return anchorScale_; }

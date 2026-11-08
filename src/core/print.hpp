@@ -26,6 +26,8 @@ class PrintModel {
   Vec3 printDensity(const Vec3& printLogE) const;
 
   const Stock& stock() const { return stock_; }
+  // The filtered printer lamp (3200 K behind a UV cut); exposed for tests and diagnostics.
+  const Spectrum& lamp() const { return lamp_; }
 
  private:
   Stock stock_;

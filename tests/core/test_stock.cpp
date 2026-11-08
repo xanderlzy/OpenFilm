@@ -96,3 +96,21 @@ TEST_CASE("curve eval and inverse") {
   CHECK(c.inverse(9.0) == 3.0);
   for (double x : {1.1, 1.5, 1.9, 2.4}) CHECK(c.inverse(c.eval(x)) == doctest::Approx(x));
 }
+
+TEST_CASE("density spectra are held at their edge values outside the digitised range") {
+  // A density of 0 outside the chart would mean perfectly clear film, which lets UV through a
+  // negative that is really dyed there. So dyes and base keep their last digitised value.
+  const Stock neg = loadStock(kStocks + "/kodak-5219-type.json");
+  const Stock prt = loadStock(kStocks + "/kodak-2383-type.json");
+  CHECK(neg.dye[2][0] > 0.0);                 // 380 nm, below the chart's 400 nm start
+  CHECK(neg.dye[2][0] == neg.dye[2][4]);      // equals the 400 nm value
+  CHECK(neg.base[0] == neg.base[4]);
+  for (int i = 0; i < 3; ++i) CHECK(prt.dye[i][80] == prt.dye[i][74]);  // 780 nm == 750 nm
+}
+
+TEST_CASE("sensitivities stay zero outside their digitised range") {
+  // Unlike density, no data means no response.
+  const Stock neg = loadStock(kStocks + "/kodak-5219-type.json");
+  CHECK(neg.sensitivity[0][64] == 0.0);  // red layer ends at 680 nm
+  CHECK(neg.sensitivity[0][24] == 0.0);  // and starts at 510 nm
+}
