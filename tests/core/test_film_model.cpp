@@ -122,3 +122,19 @@ TEST_CASE("params hash covers every field") {
   b = a; b.printerLights[2] = 1; CHECK(a.hash() != b.hash());
   b = a; b.printDensity = 1; CHECK(a.hash() != b.hash());
 }
+
+TEST_CASE("green-layer exposure is smooth for saturated reds and magentas") {
+  // Regression for the jagged spectra near the Rec.2020 edge: a fine sweep of red must move
+  // green-layer log E in one direction only (up to a tiny epsilon), not wobble.
+  const FilmModel m(res(), params());
+  int reversals = 0;
+  double prev = m.negativeLogExposure({0.80, 0.0834, 0.7028})[1], prevDelta = 0;
+  for (int i = 1; i <= 491; ++i) {  // 0.80 .. 0.92 in 1/4096 steps
+    const double g = m.negativeLogExposure({0.80 + i / 4096.0, 0.0834, 0.7028})[1];
+    const double delta = g - prev;
+    if (std::abs(delta) > 1e-6 && std::abs(prevDelta) > 1e-6 && (delta > 0) != (prevDelta > 0)) ++reversals;
+    if (std::abs(delta) > 1e-6) prevDelta = delta;
+    prev = g;
+  }
+  CHECK(reversals == 0);
+}

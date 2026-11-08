@@ -90,21 +90,23 @@ TEST_CASE("scene-linear brightness") {
 }
 
 TEST_CASE("reflectance bounds") {
-  // The curve is a sigmoid (0..1) scaled by 2*max(rgb), so it is a true reflectance (<= 1)
-  // for inputs up to 0.5 and never exceeds 2*max(rgb) above that.
+  // The curve is a sigmoid (0..1) scaled by k = max(rgb)/brightness, where brightness is 0.5 for
+  // ordinary colours and falls to 0.2 at the gamut edge (controller ruling, Task 9 fix round 1:
+  // saturated colours are fitted on a darker table slice where a valid curve exists). So it
+  // never exceeds max(rgb)/0.2, and inputs <= 0.2 are true reflectances (<= 1).
   std::mt19937 rng(3);
   std::uniform_real_distribution<double> u(0.0, 1.0);
   for (int i = 0; i < 1000; ++i) {
     const Vec3 rgb{u(rng), u(rng), u(rng)};
     const double m = std::max({rgb[0], rgb[1], rgb[2]});
-    const Vec3 half{rgb[0] * 0.5, rgb[1] * 0.5, rgb[2] * 0.5};
-    for (double v : model().toSpectrum(half)) {
+    const Vec3 dim{rgb[0] * 0.2, rgb[1] * 0.2, rgb[2] * 0.2};
+    for (double v : model().toSpectrum(dim)) {
       CHECK(v >= 0.0);
       CHECK(v <= 1.0 + 1e-9);
     }
     for (double v : model().toSpectrum(rgb)) {
       CHECK(v >= 0.0);
-      CHECK(v <= 2.0 * m + 1e-9);
+      CHECK(v <= m / 0.2 + 1e-9);
     }
   }
 }

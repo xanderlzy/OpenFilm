@@ -68,8 +68,8 @@ float Curve1D::eval(float x) const {
   return values[i] + (values[i + 1] - values[i]) * t;
 }
 
-std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSize) {
-  Lut3D lutE(lutSize, {0, 0, 0}, {1, 1, 1});
+std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, int lutSizeP) {
+  Lut3D lutE(lutSizeE, {0, 0, 0}, {1, 1, 1});
   lutE.bake([&](const Vec3& di) { return model.negativeLogExposure(di); });
 
   std::array<Curve1D, 3> curves;
@@ -88,7 +88,16 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSize) {
     }
   }
 
-  Lut3D lutP(lutSize, {0, 0, 0}, {4, 4, 4});
+  // The print LUT only needs the densities the negative can actually produce (its curves'
+  // min..max per layer, plus a sliver of margin). Spending the nodes there instead of on the
+  // whole 0..4 cube makes the print LUT several times denser where it matters.
+  Vec3 dLo, dHi;
+  for (size_t c = 0; c < 3; ++c) {
+    const auto mm = std::minmax_element(curves[c].values.begin(), curves[c].values.end());
+    dLo[c] = std::max(0.0, double(*mm.first) - 0.02);
+    dHi[c] = double(*mm.second) + 0.02;
+  }
+  Lut3D lutP(lutSizeP, dLo, dHi);
   lutP.bake([&](const Vec3& d) { return model.printOutput(d); });
   return std::make_shared<const BakedFilm>(BakedFilm{std::move(lutE), std::move(curves), std::move(lutP)});
 }

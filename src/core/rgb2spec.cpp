@@ -103,9 +103,18 @@ Spectrum Rgb2Spec::toSpectrum(const Vec3& rgb) const {
     if (!std::isfinite(c)) c = 0.0;
   const double m = std::max({v[0], v[1], v[2]});
   if (m <= 0.0) return out;
-  // Fit rgb/(2m) so the curve sits mid-range (fully saturated colours have no 0..1 curve),
-  // then multiply by 2m to restore the brightness.
-  const double k = 2.0 * m;
+  // Fit rgb/k on a mid-brightness slice of the table, then multiply by k to restore brightness.
+  // Ordinary colours use brightness 0.5 (k = 2m) so the curve sits mid-range. Very saturated
+  // colours (near the Rec.2020 edge) have no valid 0..1 curve at that brightness: the table cells
+  // there hold arbitrary, mutually unrelated fits, which shows up as jagged film exposure.
+  // On a darker slice every hue is reachable, so from saturation 0.85 the brightness eases
+  // (smoothstep) down to 0.2 at the gamut edge. Colours below 0.85 are unchanged.
+  const double mn = std::max(std::min({v[0], v[1], v[2]}), 0.0);
+  const double sat = std::clamp(1.0 - mn / m, 0.0, 1.0);
+  double t = std::clamp((sat - 0.85) / (1.0 - 0.85), 0.0, 1.0);
+  t = t * t * (3.0 - 2.0 * t);
+  const double brightness = 0.5 + (0.2 - 0.5) * t;
+  const double k = m / brightness;
   const auto c = coefficients({v[0] / k, v[1] / k, v[2] / k});
   for (int i = 0; i < kSpectralSamples; ++i) {
     const double l = wavelength(i);

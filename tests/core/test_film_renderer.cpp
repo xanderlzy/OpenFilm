@@ -111,7 +111,7 @@ TEST_CASE("baked matches direct within DeltaE2000 0.5") {
   const auto t0 = std::chrono::steady_clock::now();
   const auto film = bakeFilm(model);
   const double bakeSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  std::printf("bake 65^3: %.2f s\n", bakeSec);
+  std::printf("bake default sizes: %.2f s\n", bakeSec);
 
   std::mt19937 rng(11);
   std::uniform_real_distribution<double> u(0, 1), ue(-3, 3);

@@ -92,3 +92,22 @@ TEST_CASE("DWG limits are at least 1.0001 and cover the DWG primaries") {
   const Vec3 lim = dwgLimitsInRec2020();
   for (int c = 0; c < 3; ++c) CHECK(lim[c] >= 1.0001);
 }
+
+TEST_CASE("DWG limits cover the whole DWG cube surface") {
+  // Mixtures of two primaries reach further from the achromatic axis than the primaries do.
+  const Vec3 lim = dwgLimitsInRec2020();
+  const Mat3 m = dwgToRec2020();
+  double worst[3] = {0, 0, 0};
+  for (int f = 0; f < 3; ++f)
+    for (int i = 0; i <= 200; ++i)
+      for (int j = 0; j <= 200; ++j) {
+        Vec3 dwg;
+        dwg[size_t(f)] = 1.0;
+        dwg[size_t((f + 1) % 3)] = i / 200.0;
+        dwg[size_t((f + 2) % 3)] = j / 200.0;
+        const Vec3 c = mul(m, dwg);
+        if (std::max({c[0], c[1], c[2]}) <= 0) continue;
+        for (int ch = 0; ch < 3; ++ch) worst[ch] = std::max(worst[ch], distance(c, ch));
+      }
+  for (int ch = 0; ch < 3; ++ch) CHECK(lim[size_t(ch)] >= worst[ch]);
+}

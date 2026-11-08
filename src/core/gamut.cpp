@@ -6,17 +6,25 @@
 namespace openfilm {
 
 Vec3 dwgLimitsInRec2020() {
-  // Express each DWG primary in Rec.2020: these are the most saturated colours the input can
-  // hold, so their distances are the worst case the compression must map to the gamut edge.
+  // Walk the three faces of the DWG cube that touch white (one channel at 1, the others 0..1) in
+  // Rec.2020. Mixtures of two primaries reach further out than the primaries themselves, so
+  // scanning only the corners under-estimates the limit and hard-clips real colours at the edge.
   const Mat3 m = mul(inverse(rgbToXyz(kRec2020)), rgbToXyz(kDaVinciWideGamut));
   Vec3 lim{1.0001, 1.0001, 1.0001};
-  for (int p = 0; p < 3; ++p) {
-    Vec3 dwg{0, 0, 0};
-    dwg[p] = 1.0;
-    const Vec3 c = mul(m, dwg);
-    const double ach = std::max({c[0], c[1], c[2]});
-    for (int ch = 0; ch < 3; ++ch) lim[ch] = std::max(lim[ch], (ach - c[ch]) / ach);
-  }
+  constexpr int n = 400;
+  for (int f = 0; f < 3; ++f)
+    for (int i = 0; i <= n; ++i)
+      for (int j = 0; j <= n; ++j) {
+        Vec3 dwg;
+        dwg[size_t(f)] = 1.0;
+        dwg[size_t((f + 1) % 3)] = double(i) / n;
+        dwg[size_t((f + 2) % 3)] = double(j) / n;
+        const Vec3 c = mul(m, dwg);
+        const double ach = std::max({c[0], c[1], c[2]});
+        if (ach <= 0) continue;
+        // Small margin: grid sampling can miss the exact peak between nodes.
+        for (int ch = 0; ch < 3; ++ch) lim[size_t(ch)] = std::max(lim[size_t(ch)], (ach - c[size_t(ch)]) / ach * 1.0001);
+      }
   return lim;
 }
 

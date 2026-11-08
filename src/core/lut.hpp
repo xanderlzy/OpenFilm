@@ -45,11 +45,12 @@ struct Curve1D {
 struct BakedFilm {
   Lut3D lutE;                       // DI [0,1]^3 -> log E
   std::array<Curve1D, 3> negCurves;  // log E over [curve min - 1, curve max + 1] -> Status M density
-  Lut3D lutP;                       // density [0,4]^3 -> display code
+  Lut3D lutP;                       // reachable negative density (per-channel domain) -> display code
 };
 
-// Holds no reference to `model` afterwards.
-std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSize = 65);
+// Default sizes (113^3 exposure, 97^3 print) were chosen to keep baked-vs-direct error under
+// 0.4 dE2000 on 2000 random look-ups; 65^3 reached 0.65. Holds no reference to `model` afterwards.
+std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE = 113, int lutSizeP = 97);
 
 // Keeps the last 4 looks so dragging a slider back and forth does not rebake. Exposure is not
 // part of FilmParams (it is applied between the LUTs), so changing it never misses the cache.
