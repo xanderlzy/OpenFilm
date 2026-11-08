@@ -20,11 +20,21 @@ Rgb2Spec Rgb2Spec::load(const std::string& coeffPath) {
   std::unique_ptr<std::FILE, FileCloser> f(std::fopen(coeffPath.c_str(), "rb"));
   if (!f) throw std::runtime_error("cannot open RGB-to-spectrum table: " + coeffPath);
 
+  // Measure the file first: a corrupt header must not be able to trigger a huge allocation.
+  if (std::fseek(f.get(), 0, SEEK_END) != 0) throw std::runtime_error("cannot read RGB-to-spectrum table: " + coeffPath);
+  const long fileLen = std::ftell(f.get());
+  std::rewind(f.get());
+
   char magic[4];
   std::uint32_t res = 0;
-  if (std::fread(magic, 4, 1, f.get()) != 1 || std::memcmp(magic, "SPEC", 4) != 0 ||
-      std::fread(&res, sizeof res, 1, f.get()) != 1 || res < 2 || res > 1024)
+  if (fileLen < 8 || std::fread(magic, 4, 1, f.get()) != 1 || std::memcmp(magic, "SPEC", 4) != 0 ||
+      std::fread(&res, sizeof res, 1, f.get()) != 1)
     throw std::runtime_error("not an RGB-to-spectrum table: " + coeffPath);
+  if (res < 2 || res > 256)
+    throw std::runtime_error("RGB-to-spectrum table has unsupported resolution: " + coeffPath);
+  const std::uint64_t r = res;
+  if (std::uint64_t(fileLen) != 8 + 4 * r + 4 * 9 * r * r * r)
+    throw std::runtime_error("RGB-to-spectrum table has the wrong size: " + coeffPath);
 
   Rgb2Spec m;
   m.res_ = static_cast<int>(res);
@@ -33,17 +43,18 @@ Rgb2Spec Rgb2Spec::load(const std::string& coeffPath) {
   if (std::fread(m.scale_.data(), sizeof(float), m.scale_.size(), f.get()) != m.scale_.size() ||
       std::fread(m.data_.data(), sizeof(float), m.data_.size(), f.get()) != m.data_.size())
     throw std::runtime_error("truncated RGB-to-spectrum table: " + coeffPath);
-  // Anything left over means the file was written by a different tool version.
-  char extra;
-  if (std::fread(&extra, 1, 1, f.get()) != 0)
-    throw std::runtime_error("RGB-to-spectrum table has unexpected size: " + coeffPath);
+  // coefficients() binary-searches the brightness slices, so they must be strictly increasing.
+  for (std::size_t i = 1; i < m.scale_.size(); ++i)
+    if (!(m.scale_[i] > m.scale_[i - 1]))
+      throw std::runtime_error("RGB-to-spectrum table has a bad brightness scale: " + coeffPath);
   return m;
 }
 
 std::array<double, 3> Rgb2Spec::coefficients(const Vec3& rgbIn) const {
   // The table is indexed by the largest channel (z) and the other two relative to it (x, y).
   Vec3 rgb;
-  for (int j = 0; j < 3; ++j) rgb[j] = std::clamp(rgbIn[j], 0.0, 1.0);
+  // Non-finite channels count as 0 so a bad pixel can never index outside the table.
+  for (int j = 0; j < 3; ++j) rgb[j] = std::isfinite(rgbIn[j]) ? std::clamp(rgbIn[j], 0.0, 1.0) : 0.0;
   int i = 0;
   for (int j = 1; j < 3; ++j)
     if (rgb[j] >= rgb[i]) i = j;
@@ -76,12 +87,16 @@ std::array<double, 3> Rgb2Spec::coefficients(const Vec3& rgbIn) const {
 
 Spectrum Rgb2Spec::toSpectrum(const Vec3& rgb) const {
   Spectrum out{};
-  const double m = std::max({rgb[0], rgb[1], rgb[2]});
+  // A NaN/Inf pixel (e.g. from a bad upstream node) is treated as 0 rather than poisoning the spectrum.
+  Vec3 v = rgb;
+  for (double& c : v)
+    if (!std::isfinite(c)) c = 0.0;
+  const double m = std::max({v[0], v[1], v[2]});
   if (m <= 0.0) return out;
   // Fit rgb/(2m) so the curve sits mid-range (fully saturated colours have no 0..1 curve),
   // then multiply by 2m to restore the brightness.
   const double k = 2.0 * m;
-  const auto c = coefficients({rgb[0] / k, rgb[1] / k, rgb[2] / k});
+  const auto c = coefficients({v[0] / k, v[1] / k, v[2] / k});
   for (int i = 0; i < kSpectralSamples; ++i) {
     const double l = wavelength(i);
     out[i] = k * sigmoid((c[0] * l + c[1]) * l + c[2]);

@@ -25,7 +25,7 @@ FetchContent_MakeAvailable(doctest)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
 
 # --- Jakob-Hanika table: Rec.2020 RGB -> spectrum coefficients, built once ----
-# The optimiser takes a minute or so, so it only reruns when the tool itself changes.
+# The optimiser takes a few seconds, so it only reruns when the tool itself changes.
 add_executable(rgb2spec_opt tools/rgb2spec/rgb2spec_opt.cpp)
 target_compile_options(rgb2spec_opt PRIVATE -O3 -w)  # vendored code: speed matters, warnings don't
 set(OPENFILM_COEFF ${CMAKE_BINARY_DIR}/resources/rec2020.coeff)

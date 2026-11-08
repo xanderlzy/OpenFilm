@@ -3,7 +3,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
 #include <random>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "core/color.hpp"
 #include "core/rgb2spec.hpp"
@@ -107,4 +116,58 @@ TEST_CASE("black") {
 
 TEST_CASE("bad file") {
   CHECK_THROWS(Rgb2Spec::load("/nonexistent"));
+}
+
+namespace {
+// Writes bytes to a temp file and returns its path (callers remove it).
+std::string writeTemp(const std::string& name, const std::vector<char>& bytes) {
+  const std::string path = (std::filesystem::temp_directory_path() / name).string();
+  std::ofstream(path, std::ios::binary).write(bytes.data(), std::streamsize(bytes.size()));
+  return path;
+}
+std::vector<char> readAll(const char* path) {
+  std::ifstream in(path, std::ios::binary);
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+}  // namespace
+
+TEST_CASE("corrupt header with huge res is rejected without allocating") {
+  std::vector<char> b{'S', 'P', 'E', 'C'};
+  const std::uint32_t res = 1000;
+  b.insert(b.end(), reinterpret_cast<const char*>(&res), reinterpret_cast<const char*>(&res) + 4);
+  b.resize(20, 0);
+  const std::string p = writeTemp("openfilm_bad_res.coeff", b);
+  CHECK_THROWS_AS(Rgb2Spec::load(p), std::runtime_error);
+  std::remove(p.c_str());
+}
+
+TEST_CASE("truncated table is rejected") {
+  std::vector<char> b = readAll(OPENFILM_COEFF_PATH);
+  REQUIRE(b.size() > 1000);
+  b.resize(b.size() - 100);
+  const std::string p = writeTemp("openfilm_trunc.coeff", b);
+  CHECK_THROWS_AS(Rgb2Spec::load(p), std::runtime_error);
+  std::remove(p.c_str());
+}
+
+TEST_CASE("non-increasing scale table is rejected") {
+  std::vector<char> b = readAll(OPENFILM_COEFF_PATH);
+  REQUIRE(b.size() > 20);
+  std::copy(b.begin() + 12, b.begin() + 16, b.begin() + 8);  // scale[0] = scale[1]
+  const std::string p = writeTemp("openfilm_scale.coeff", b);
+  CHECK_THROWS_AS(Rgb2Spec::load(p), std::runtime_error);
+  std::remove(p.c_str());
+}
+
+TEST_CASE("non-finite input channels give finite spectra") {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  const Vec3 cases[] = {{nan, 0.5, 0.2}, {inf, 0.5, 0.2}, {-inf, 0.5, 0.2}, {0.3, nan, inf}};
+  for (const Vec3& c : cases)
+    for (double v : model().toSpectrum(c)) CHECK(std::isfinite(v));
+  for (double v : model().toSpectrum({nan, nan, nan})) CHECK(v == 0.0);
+  // A NaN channel behaves like zero.
+  const Spectrum a = model().toSpectrum({nan, 0.5, 0.2}), b = model().toSpectrum({0.0, 0.5, 0.2});
+  for (int i = 0; i < kSpectralSamples; ++i) CHECK(a[i] == b[i]);
+  for (double v : model().coefficients({nan, inf, -inf})) CHECK(std::isfinite(v));
 }
