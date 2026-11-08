@@ -1,10 +1,14 @@
+<p align="center">
+  <img src="branding/openfilm-logo.png" alt="OpenFilm — physical film emulation" width="640">
+</p>
+
 # OpenFilm
 
 OpenFilm is an open-source OpenFX plugin for DaVinci Resolve Studio (macOS, Metal) that emulates
 motion-picture film by simulating its physical behaviour: a spectral camera-negative → print
 pipeline with halation, bloom and grain, built from published film-stock datasheets.
 
-> **⚠️ Work in progress.** OpenFilm is under active development and not ready for production use. Milestone 1 (plugin scaffold) is done; Milestone 2 (spectral colour model, CPU) is in progress on the `m2-color-model` branch. Expect breaking changes.
+> **⚠️ Work in progress.** OpenFilm is under active development and not ready for production use. Milestones 1 (plugin scaffold) and 2 (spectral 500T → 2383 colour model, CPU only, so playback is slow) are done on the `m2-color-model` branch; GPU rendering, halation, bloom and grain are still to come. Expect breaking changes.
 
 Quick start: `cmake -S . -B build && cmake --build build && ctest --test-dir build && scripts/install.sh`, then restart Resolve.
 Full guide: [docs/building.md](docs/building.md).
