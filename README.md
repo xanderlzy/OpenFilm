@@ -6,7 +6,8 @@ pipeline with halation, bloom and grain, built from published film-stock datashe
 
 Status: early development (Milestone 1 — plugin scaffold).
 
-See [docs/building.md](docs/building.md) to build, test and install.
+Quick start: `cmake -S . -B build && cmake --build build && ctest --test-dir build && scripts/install.sh`, then restart Resolve.
+Full guide: [docs/building.md](docs/building.md).
 Design: [docs/superpowers/specs/2026-11-08-film-emulator-design.md](docs/superpowers/specs/2026-11-08-film-emulator-design.md).
 
 Built against OpenFX `OFX_Release_1.5.1` (git submodule in `external/openfx`).
