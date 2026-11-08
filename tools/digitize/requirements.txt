@@ -1,0 +1,4 @@
+PyMuPDF==1.26.5
+numpy==1.26.4
+Pillow==11.3.0
+jsonschema==4.25.1

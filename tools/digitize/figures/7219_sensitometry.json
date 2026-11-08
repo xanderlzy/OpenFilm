@@ -1,0 +1,14 @@
+{
+  "comment": "Kodak VISION3 500T 5219/7219 'Sensitometric Curves' (TI2647F), p.4. All three curves are drawn in the same near-black solid stroke, so each is told apart by its bounding box: B is the top curve, R the bottom. The figure legend says 'Densitometry: ECN-2'; Kodak's camera-negative curves are Status M (the spectral-sensitivity figure on the same page says Status M), so the stock is tagged statusM. The x calibration uses the top LOG EXPOSURE (lux-seconds) axis: its -4.0 and 1.0 labels sit on the frame edges. Its interior ticks are irregular (-3.0 at 390.1, -2.0 at 425.5, -1.0 at 462.0, 0.0 at 502.5 pt against a uniform 36.92 pt per log E), so the frame edges are the reference, giving up to 0.05 log E uncertainty locally.",
+  "pdf": "7219.pdf",
+  "page": 4,
+  "clip": [326, 100, 549, 324],
+  "columns": ["logE", "density"],
+  "xAxis": {"v0": -4.0, "v1": 1.0, "labelClip": [340, 112, 550, 123]},
+  "yAxis": {"v0": 0.0, "v1": 3.0, "labelClip": [335, 115, 352, 312]},
+  "curves": {
+    "blue":  {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [353.6, 138.0, 538.2, 255.1]},
+    "green": {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [353.6, 149.2, 538.2, 270.8]},
+    "red":   {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [353.6, 192.3, 538.2, 295.1]}
+  }
+}

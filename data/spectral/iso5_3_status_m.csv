@@ -1,0 +1,45 @@
+# ISO 5-3 Status M densitometry: log10 spectral products (normalised to 5.000 peak), 400-770 nm at 10 nm.
+# Source: ANSI/ISO 5-3-1995 = ANSI/NAPM IT2.18-1996, Table 4 (p.17), https://law.resource.org/pub/us/cfr/ibr/001/aimm.it2.18.1996.pdf , retrieved 2026-11-08.
+# Values transcribed as printed. Empty cell = no tabulated value. The table's edge "slope" extrapolations
+# (blue +0.250/nm below 410 and -0.220/nm above 510; green +0.106/nm below 470 and -0.120/nm above 610;
+# red +0.260/nm below 620 and -0.040/nm above 770) were NOT applied: they add negligible weight (>2 decades down).
+# Status M is the camera-negative (printing) densitometry standard.
+nm,blue,green,red
+400,,,
+410,2.103,,
+420,4.111,,
+430,4.632,,
+440,4.871,,
+450,5.000,,
+460,4.955,,
+470,4.743,1.152,
+480,4.343,2.207,
+490,3.743,3.156,
+500,2.990,3.804,
+510,1.852,4.272,
+520,,4.626,
+530,,4.872,
+540,,5.000,
+550,,4.995,
+560,,4.818,
+570,,4.458,
+580,,3.915,
+590,,3.172,
+600,,2.239,
+610,,1.070,
+620,,,2.109
+630,,,4.479
+640,,,5.000
+650,,,4.899
+660,,,4.578
+670,,,4.252
+680,,,3.875
+690,,,3.491
+700,,,3.099
+710,,,2.687
+720,,,2.269
+730,,,1.859
+740,,,1.449
+750,,,1.054
+760,,,0.654
+770,,,0.254

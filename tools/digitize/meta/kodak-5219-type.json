@@ -1,0 +1,29 @@
+{
+  "comment": "Inputs for build_stock.py. Curve/spectrum entries are points CSVs relative to tools/digitize/. midGreyLogExposure: the 'Camera Stops 0' tick (x = 445.9 pt) on the 7219 sensitometric graph lines up with log E -1.50 on the top LOG EXPOSURE axis calibrated by its frame-edge labels -4.0 and 1.0 (0 stops is exactly mid-frame). Reading the irregular local top ticks (-2.0 at 425.5, -1.0 at 462.0 pt) instead gives -1.44; see figures/7219_sensitometry.json.",
+  "id": "kodak-5219-type",
+  "displayName": "Tungsten 500T (5219-type)",
+  "type": "negative",
+  "densitometry": "statusM",
+  "sources": [
+    {
+      "title": "KODAK VISION3 500T Color Negative Film 5219 / 7219 / SO-219, Technical Data H-1-5219t (Revised 7-15)",
+      "url": "https://www.kodak.com/content/products-brochures/Film/VISION3-500T-Color-Negative-Film-7219-TECHNICAL-DATA.pdf",
+      "retrieved": "2026-11-08",
+      "figures": ["Sensitometric Curves (p.4, TI2647F)", "Spectral Sensitivity Curves (p.4, TI2647D)", "Spectral Dye Density Curves (p.5, TI2647E)"]
+    }
+  ],
+  "balanceIlluminantK": 3200,
+  "midGreyLogExposure": -1.5,
+  "layers": {
+    "red":   {"logSensitivity": "points/7219_spectral_sensitivity_cyanForming.csv",    "characteristicCurve": "points/7219_sensitometry_red.csv"},
+    "green": {"logSensitivity": "points/7219_spectral_sensitivity_magentaForming.csv", "characteristicCurve": "points/7219_sensitometry_green.csv"},
+    "blue":  {"logSensitivity": "points/7219_spectral_sensitivity_yellowForming.csv",  "characteristicCurve": "points/7219_sensitometry_blue.csv"}
+  },
+  "dyeDensity": {
+    "cyan": "points/7219_dye_density_cyan.csv",
+    "magenta": "points/7219_dye_density_magenta.csv",
+    "yellow": "points/7219_dye_density_yellow.csv"
+  },
+  "baseDensity": "points/7219_dye_density_minimumDensity.csv",
+  "interlayer": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+}

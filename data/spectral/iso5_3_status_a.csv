@@ -1,0 +1,43 @@
+# ISO 5-3 Status A densitometry: log10 spectral products (normalised to 5.000 peak), 400-750 nm at 10 nm.
+# Source: ANSI/ISO 5-3-1995 = ANSI/NAPM IT2.18-1996, Table 3 (p.16), https://law.resource.org/pub/us/cfr/ibr/001/aimm.it2.18.1996.pdf , retrieved 2026-11-08.
+# Values transcribed as printed. Empty cell = no tabulated value. The table's edge "slope" extrapolations
+# (blue +0.380/nm below 420 and -0.140/nm above 500; green +0.220/nm below 500 and -0.170/nm above 590;
+# red +0.270/nm below 600 and -0.040/nm above 750) were NOT applied: they add negligible weight (>2 decades down).
+# Status A is the print-film (projection) densitometry standard.
+nm,blue,green,red
+400,,,
+410,,,
+420,3.602,,
+430,4.819,,
+440,5.000,,
+450,4.912,,
+460,4.620,,
+470,4.040,,
+480,2.989,,
+490,1.566,,
+500,0.165,1.650,
+510,,3.822,
+520,,4.782,
+530,,5.000,
+540,,4.906,
+550,,4.644,
+560,,4.221,
+570,,3.609,
+580,,2.766,
+590,,1.579,
+600,,,2.568
+610,,,4.638
+620,,,5.000
+630,,,4.871
+640,,,4.604
+650,,,4.286
+660,,,3.900
+670,,,3.551
+680,,,3.165
+690,,,2.776
+700,,,2.383
+710,,,1.970
+720,,,1.551
+730,,,1.141
+740,,,0.741
+750,,,0.341

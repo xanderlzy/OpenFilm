@@ -1,0 +1,14 @@
+{
+  "comment": "Kodak VISION Color Print Film 2383 'Spectral Dye Density Curves' (F010_0294AC), p.5. Raster image read by eye every 10 nm. NOT peak-normalised: the dyes are scaled to form a visual neutral density of 1.0 for a xenon-arc viewing illuminant (yellow peak 0.81, magenta 0.88, cyan 1.09), Process ECP-2D. The wavelength tick LABELS under this graph are misplaced (spaced about 1.7 px/nm instead of the tick spacing of 2.05 px/nm; the '750' label sits under the 700 tick). The drawn tick marks are used: ten equal intervals across the frame, 250 nm at the left frame edge (pixel 216.5 on the 400 dpi render) and 750 nm at the right (pixel 1241.0); density 0.0 at pixel 1149.0 and 1.4 at 123.0. This puts the yellow, magenta and cyan peaks at 446, 541 and 660 nm, which is where colour print-film dyes normally peak; the labels would put them near 480, 590 and 730 nm. Curve identity in the crossings: near 447 nm the magenta blue-side lobe (peak 0.30 at 392 nm) meets the cyan short-wave tail (bump 0.094 at 429 nm); the magenta lobe was taken to continue into the magenta main rise (magenta secondary blue absorption is the larger one) and the cyan tail into the flat 0.03 floor, from where it rises to the cyan peak. Near 530 nm the yellow fall continues into the long low tail. Tails below about 0.03 are within one line width of the axis (+/-0.005).",
+  "pdf": "2383.pdf",
+  "page": 5,
+  "clip": [323.28, 35.28, 564.48, 270.0],
+  "columns": ["nm", "density"],
+  "xAxis": {"v0": 250, "v1": 750, "p0": 362.25, "p1": 546.66},
+  "yAxis": {"v0": 0.0, "v1": 1.4, "p0": 242.1, "p1": 57.42},
+  "curves": {
+    "yellow": {"hand": true},
+    "magenta": {"hand": true},
+    "cyan": {"hand": true}
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "comment": "Kodak VISION Color Print Film 2383 'Sensitometric Curves' (F002_1254AC), p.4. Raster image (about 150 dpi native), read by eye: every 0.1 log E. Exposure 1/500 s tungsten + heat-absorbing glass; Process ECP-2D; Status A densitometry. Axis calibration from the drawn ticks on the 400 dpi render (clip aligned to whole pixels): log E -3.0 at pixel 186.5 and 3.0 at 1211 (x), density 0.0 at pixel 1174 and 6.0 at 147.5 (y), converted to PDF points as (clip origin px + pixel) * 72/400. In the toe the G and R lines overlap into one band from log E -0.7 to 0.0; G was read from the band's top edge and R from its bottom edge (both within 0.02 D). B and G merge into the shoulder plateau near log E 1.9-2.0; R continues alone to about 2.58.",
+  "pdf": "2383.pdf",
+  "page": 4,
+  "clip": [36.0, 51.84, 271.44, 290.88],
+  "columns": ["logE", "density"],
+  "xAxis": {"v0": -3.0, "v1": 3.0, "p0": 69.57, "p1": 253.98},
+  "yAxis": {"v0": 0.0, "v1": 6.0, "p0": 263.16, "p1": 78.39},
+  "curves": {
+    "blue": {"hand": true},
+    "green": {"hand": true},
+    "red": {"hand": true}
+  }
+}

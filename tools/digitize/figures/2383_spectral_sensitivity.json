@@ -1,0 +1,16 @@
+{
+  "comment": "Kodak VISION Color Print Film 2383 'Spectral Sensitivity Curves' (F010_0293AC), p.5. Raster image read by eye. Log sensitivity = log10(1 / exposure in erg/cm^2 needed for density 1.0), Process ECP-2D, tungsten exposure 1/50 s. Yellow-forming = blue-sensitive layer, magenta-forming = green, cyan-forming = red. Calibration from the grid lines on the 400 dpi render: 250 nm at pixel 193.0, 750 nm at 1286.5; log sensitivity +1.0 at pixel 130.0, -3.0 at 957.0. Steep flanks were read every 0.1 log rather than every 10 nm. Near 587-592 nm the magenta fall and the cyan rise cross below -2.5; which line is which there is ambiguous (worth < 0.01 of either peak). Two extra unlabelled curves start together at 372 nm (-0.75) and fall off the chart floor at about 392 and 399 nm: almost certainly the native blue/UV sensitivity of the green- and red-sensitive layers. They are digitised (uvBranchLeft/uvBranchRight) but NOT put in the stock JSON: they are not labelled, they lie below 400 nm where Kodak recommends a UV filter (WRATTEN 2B) in the printer, and stitching them on would need invented values across the off-chart gap.",
+  "pdf": "2383.pdf",
+  "page": 5,
+  "clip": [41.04, 35.28, 293.76, 270.0],
+  "columns": ["nm", "logSensitivity"],
+  "xAxis": {"v0": 250, "v1": 750, "p0": 75.78, "p1": 272.61},
+  "yAxis": {"v0": 1.0, "v1": -3.0, "p0": 58.68, "p1": 207.54},
+  "curves": {
+    "yellowForming": {"hand": true},
+    "magentaForming": {"hand": true},
+    "cyanForming": {"hand": true},
+    "uvBranchLeft": {"hand": true},
+    "uvBranchRight": {"hand": true}
+  }
+}

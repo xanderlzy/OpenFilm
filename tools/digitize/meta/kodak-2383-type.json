@@ -1,0 +1,33 @@
+{
+  "comment": "Inputs for build_stock.py. Curve/spectrum entries are points CSVs relative to tools/digitize/. labAimDensity: the current 2383 data sheet (Revised 3-22) names LAD on p.3 but prints no numbers and refers to Kodak Publication H-61; H-61B 'LAD for KODAK VISION Color Print Film' states the Status A aim for 2383/3383 as 1.09 red, 1.06 green, 1.03 blue, so H-61B is cited as a second source. The 2383 dye densities are as printed (scaled to a 1.0 visual neutral, not peak-normalised). The two unlabelled UV branches on the spectral-sensitivity graph are digitised but not used; see figures/2383_spectral_sensitivity.json.",
+  "id": "kodak-2383-type",
+  "displayName": "Print 2383-type",
+  "type": "print",
+  "densitometry": "statusA",
+  "sources": [
+    {
+      "title": "KODAK VISION Color Print Film 2383 / 3383 data sheet, Publication H-1-2383 (Revised 3-22)",
+      "url": "https://www.kodak.com/content/products-brochures/Film/KODAK-VISION-Color-Print-Film-2383-3383-data-sheet.pdf",
+      "retrieved": "2026-11-08",
+      "figures": ["Sensitometric Curves (p.4, F002_1254AC)", "Spectral Sensitivity Curves (p.5, F010_0293AC)", "Spectral Dye Density Curves (p.5, F010_0294AC)"]
+    },
+    {
+      "title": "LAD for KODAK VISION Color Print Film, Publication H-61B",
+      "url": "https://www.kodak.com/content/products-brochures/Film/LAD-for-KODAK-VISION-Color-Print-Film-H-61b.pdf",
+      "retrieved": "2026-11-08",
+      "figures": ["LAD Patch text: Status A aim 1.09 red, 1.06 green, 1.03 blue"]
+    }
+  ],
+  "labAimDensity": [1.09, 1.06, 1.03],
+  "layers": {
+    "red":   {"logSensitivity": "points/2383_spectral_sensitivity_cyanForming.csv",    "characteristicCurve": "points/2383_sensitometry_red.csv"},
+    "green": {"logSensitivity": "points/2383_spectral_sensitivity_magentaForming.csv", "characteristicCurve": "points/2383_sensitometry_green.csv"},
+    "blue":  {"logSensitivity": "points/2383_spectral_sensitivity_yellowForming.csv",  "characteristicCurve": "points/2383_sensitometry_blue.csv"}
+  },
+  "dyeDensity": {
+    "cyan": "points/2383_dye_density_cyan.csv",
+    "magenta": "points/2383_dye_density_magenta.csv",
+    "yellow": "points/2383_dye_density_yellow.csv"
+  },
+  "interlayer": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+}

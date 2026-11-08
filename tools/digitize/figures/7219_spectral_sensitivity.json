@@ -1,0 +1,14 @@
+{
+  "comment": "Kodak VISION3 500T 5219/7219 'Spectral Sensitivity Curves' (TI2647D), p.4. Log sensitivity = log10(1 / exposure in erg/cm^2 needed for density 0.2 above D-min), Status M. Curves share one stroke; told apart by bounding box. Yellow-forming = blue-sensitive layer, magenta-forming = green, cyan-forming = red. Parts of these paths run underneath the white label boxes Kodak placed over the graph (the 'Effective Exposure' legend and the layer names); the hidden parts are kept, since they are Kodak's own plotted data, and were checked on the overlay.",
+  "pdf": "7219.pdf",
+  "page": 4,
+  "clip": [321, 505, 560, 700],
+  "columns": ["nm", "logSensitivity"],
+  "xAxis": {"v0": 250, "v1": 750, "labelClip": [340, 674, 562, 684]},
+  "yAxis": {"v0": 0.0, "v1": 4.0, "labelClip": [335, 512, 349, 675]},
+  "curves": {
+    "yellowForming":  {"color": [0.1331, 0.1201, 0.1229], "dashes": null, "bbox": [400.8, 548.6, 464.9, 644.1]},
+    "magentaForming": {"color": [0.1331, 0.1201, 0.1229], "dashes": null, "bbox": [432.8, 564.1, 493.0, 641.7]},
+    "cyanForming":    {"color": [0.1331, 0.1201, 0.1229], "dashes": null, "bbox": [456.9, 576.7, 525.1, 646.7]}
+  }
+}

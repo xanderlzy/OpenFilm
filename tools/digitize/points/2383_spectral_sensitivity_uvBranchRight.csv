@@ -1,0 +1,17 @@
+# 2383_spectral_sensitivity / uvBranchRight: read by eye from the 400 dpi render: every 10 nm on gentle slopes, every 0.1 log on steep ones (pixel run centres as a guide); hand points
+nm,logSensitivity
+372.0,-0.750
+374.1,-0.800
+378.0,-0.870
+380.1,-0.900
+383.0,-0.970
+386.0,-1.000
+389.9,-1.100
+392.2,-1.200
+393.6,-1.450
+395.2,-1.700
+395.9,-1.850
+396.1,-2.000
+397.0,-2.200
+398.5,-2.600
+399.2,-3.000

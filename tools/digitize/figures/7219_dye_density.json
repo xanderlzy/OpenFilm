@@ -1,0 +1,16 @@
+{
+  "comment": "Kodak VISION3 500T 5219/7219 'Spectral Dye Density Curves' (TI2647E), p.5. Process ECN-2, D-mins subtracted; the cyan, magenta and yellow curves are peak-normalised (peak 1.0). The solid curves share one stroke and are told apart by bounding box; Minimum Density is the only dashed path. Identified by peak: yellow peaks at 446 nm, magenta at 539 nm, cyan at 685 nm. Midscale Neutral is extracted for reference only (not used in the stock JSON). Small negative excursions (to about -0.05) in the dye tails are artefacts of the D-min subtraction and are clamped to 0 by build_stock.py.",
+  "pdf": "7219.pdf",
+  "page": 5,
+  "clip": [52, 150, 272, 366],
+  "columns": ["nm", "density"],
+  "xAxis": {"v0": 400, "v1": 800, "labelClip": [70, 344, 275, 353]},
+  "yAxis": {"v0": 0.0, "v1": 1.6, "labelClip": [62, 150, 78, 345]},
+  "curves": {
+    "yellow": {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [81.6, 228.9, 265.9, 321.8]},
+    "magenta": {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [81.6, 229.2, 265.9, 325.2]},
+    "cyan": {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [81.6, 229.0, 265.9, 320.3]},
+    "midscaleNeutral": {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [81.6, 169.5, 265.9, 304.3]},
+    "minimumDensity": {"color": [0.0112, 0.0161, 0.0175], "dashes": "[ 1.8001 1.8001 ] 0", "bbox": [81.6, 241.5, 261.2, 314.6]}
+  }
+}
