@@ -29,6 +29,11 @@ void spread(const Image4f& in, Image4f& out, const std::vector<PxLobe>& lobes);
 // separable (horizontal then vertical), clamp-to-edge. A channel with sigma < 0.25 px is copied. `out` must not alias `in`.
 void gaussianBlur(const Image4f& in, Image4f& out, const std::array<float, 3>& sigmaPx);
 
+// How far (full-res px) spread(in, out, lobes) reads from an output pixel: blurRadiusPx for full-res lobes,
+// (coarse radius + 2) x f for reduced-resolution ones. Pixels farther than this from the image edge
+// are unaffected by the clamp-to-edge border.
+int spreadReachPx(const std::vector<PxLobe>& lobes);
+
 int blurRadiusPx(float sigmaPx);      // ceil(3 sigma); 0 when sigma < 0.25 (identity)
 int downsampleFactor(float sigmaPx);  // 1 if sigma <= 4, else largest power of two f <= 32 with sigma / f >= 2
 

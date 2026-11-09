@@ -1,5 +1,7 @@
 #include "core/blur.hpp"
 
+#include "core/pixel_ops.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -9,19 +11,7 @@ namespace openfilm {
 
 namespace {
 
-// Runs fn(yBegin, yEnd) over [0, rows) on a pool sized from the hardware, as film_renderer does.
-void parallelRows(int rows, const std::function<void(int, int)>& fn) {
-  if (rows <= 0) return;
-  const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, rows);
-  if (threads == 1) {
-    fn(0, rows);
-    return;
-  }
-  std::vector<std::thread> pool;
-  pool.reserve(size_t(threads));
-  for (int t = 0; t < threads; ++t) pool.emplace_back(fn, rows * t / threads, rows * (t + 1) / threads);
-  for (auto& th : pool) th.join();
-}
+using detail::parallelRows;
 
 std::vector<float> makeTaps(float sigma) {
   const int r = blurRadiusPx(sigma);
@@ -40,6 +30,12 @@ void resizeTo(Image4f& img, int w, int h) {
   img.width = w;
   img.height = h;
   img.px.assign(size_t(w) * size_t(h) * 4, 0.f);
+}
+
+// Sigma (in coarse px) that, after the f x f box down and the bilinear up, gives sigma sg at full resolution.
+float reducedSigma(float sg, int f) {
+  const float ff = float(f);
+  return std::sqrt(std::max(sg * sg - (ff * ff - 1.f) / 12.f - ff * ff / 6.f, 0.0625f)) / ff;
 }
 
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -151,6 +147,20 @@ int downsampleFactor(float sigmaPx) {
   return f;
 }
 
+int spreadReachPx(const std::vector<PxLobe>& lobes) {
+  int reach = 0;
+  for (const PxLobe& lobe : lobes) {
+    const float smin = std::min({lobe.sigmaPx[0], lobe.sigmaPx[1], lobe.sigmaPx[2]});
+    const int f = downsampleFactor(smin);
+    for (size_t c = 0; c < 3; ++c) {
+      // A coarse pixel depends on its f x f block; the bilinear up reads one coarse pixel either side.
+      const int r = f == 1 ? blurRadiusPx(lobe.sigmaPx[c]) : (blurRadiusPx(reducedSigma(lobe.sigmaPx[c], f)) + 2) * f;
+      reach = std::max(reach, r);
+    }
+  }
+  return reach;
+}
+
 void gaussianBlur(const Image4f& in, Image4f& out, const std::array<float, 3>& sigmaPx) { blurImpl(in, out, sigmaPx); }
 
 void spread(const Image4f& in, Image4f& out, const std::vector<PxLobe>& lobes) {
@@ -175,11 +185,7 @@ void spread(const Image4f& in, Image4f& out, const std::vector<PxLobe>& lobes) {
       Image4f small;
       boxDown(in, small, f);
       std::array<float, 3> s;
-      const float ff = float(f);
-      for (size_t c = 0; c < 3; ++c) {
-        const float sg = lobe.sigmaPx[c];
-        s[c] = std::sqrt(std::max(sg * sg - (ff * ff - 1.f) / 12.f - ff * ff / 6.f, 0.0625f)) / ff;
-      }
+      for (size_t c = 0; c < 3; ++c) s[c] = reducedSigma(lobe.sigmaPx[c], f);
       blurImpl(small, blurred, s);
       upAccumulate(blurred, out, f, lobe.weight);
     }

@@ -61,11 +61,11 @@ add_custom_target(openfilm_resources DEPENDS ${OPENFILM_RESOURCES_STAMP})
 add_dependencies(openfilm_resources openfilm_coeff)  # the stamp rule reads the coeff file, so build it first
 
 # --- Core: plain C++ film maths, no OFX or Apple dependencies ---------------
-add_library(openfilm_core STATIC src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp src/core/negative.cpp src/core/print.cpp src/core/film_model.cpp src/core/lut.cpp src/core/optics.cpp src/core/film_renderer.cpp src/core/blur.cpp)
+add_library(openfilm_core STATIC src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp src/core/negative.cpp src/core/print.cpp src/core/film_model.cpp src/core/lut.cpp src/core/optics.cpp src/core/film_renderer.cpp src/core/blur.cpp src/core/film_spatial.cpp)
 target_include_directories(openfilm_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(openfilm_core PUBLIC nlohmann_json::nlohmann_json)
 
-add_executable(test_core tests/core/test_spectral.cpp tests/core/test_color.cpp tests/core/test_gamut.cpp tests/core/test_rgb2spec.cpp tests/core/test_stock.cpp tests/core/test_densitometry.cpp tests/core/test_negative.cpp tests/core/test_print.cpp tests/core/test_film_model.cpp tests/core/test_lut.cpp tests/core/test_optics.cpp tests/core/test_film_renderer.cpp tests/core/test_blur.cpp)
+add_executable(test_core tests/core/test_spectral.cpp tests/core/test_color.cpp tests/core/test_gamut.cpp tests/core/test_rgb2spec.cpp tests/core/test_stock.cpp tests/core/test_densitometry.cpp tests/core/test_negative.cpp tests/core/test_print.cpp tests/core/test_film_model.cpp tests/core/test_lut.cpp tests/core/test_optics.cpp tests/core/test_film_renderer.cpp tests/core/test_blur.cpp tests/core/test_film_spatial.cpp)
 target_compile_definitions(test_core PRIVATE OPENFILM_SOURCE_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
   OPENFILM_COEFF_PATH="${OPENFILM_COEFF}")
 add_dependencies(test_core openfilm_coeff)

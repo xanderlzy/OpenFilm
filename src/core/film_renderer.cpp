@@ -1,5 +1,7 @@
 #include "core/film_renderer.hpp"
 
+#include "core/pixel_ops.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <thread>
@@ -9,12 +11,8 @@ namespace openfilm {
 
 namespace {
 
-// Black for anything that is not a real number, so no NaN can reach the lookups.
-inline float sane(float v) { return std::isfinite(v) ? v : 0.f; }
-
-// The table holds the log of the projected light; the matrix has turned it into linear Rec.709; the screen's gamma (BT.1886 ~ 1/2.4) and the clip of colours
-// the display cannot show (negative light -> black) happen here, per pixel.
-inline float encodeDisplay(float linear) { return std::pow(std::max(linear, 0.f), 1.f / 2.4f); }
+using detail::encodeDisplay;
+using detail::sane;
 
 void renderRows(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const BakedFilm& film,
                 float gain, const float off[3], int yBegin, int yEnd) {
