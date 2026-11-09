@@ -154,10 +154,6 @@ public:
         fp.negativeId = pick(film.negatives, negativeStock_);
         fp.printId = pick(film.prints, printStock_);
         fp.gamutCompression = gamutCompression_->getValueAtTime(args.time);
-        // A keyframed NaN/inf would poison the whole print table; treat it as 0 like exposure.
-        auto finiteOrZero = [](double v) { return std::isfinite(v) ? v : 0.0; };
-        for (int i = 0; i < 3; ++i) fp.printerLights[i] = finiteOrZero(printerLight_[i]->getValueAtTime(args.time));
-        fp.printDensity = finiteOrZero(printDensity_->getValueAtTime(args.time));
         try {
             const auto baked = film.cache->get(fp);  // re-bakes (~1.4 s) only when the look changed
             openfilm::renderFilmCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},

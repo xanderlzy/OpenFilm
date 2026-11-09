@@ -20,11 +20,19 @@ namespace openfilm {
 struct FilmParams {
   std::string negativeId, printId;
   double gamutCompression = 0.5;
-  Vec3 printerLights{0, 0, 0};  // printer points per channel; one point = 0.025 log E
-  double printDensity = 0;      // printer points added to all three channels
 
-  uint64_t hash() const;
+  uint64_t hash() const;  // bake inputs only; the controls below never enter it
 };
+
+struct LookControls {            // per-render; never part of the bake
+  double exposureStops = 0;
+  Vec3 printerPoints{0, 0, 0};   // R, G, B points
+  double printDensity = 0;       // points added to all three
+};
+
+// The lab's auto-balance plus the printer lights: balance + 0.025 log E per point (printer
+// points and Print Density add), per channel. Non-finite control values count as 0.
+Vec3 printOffsetsLogE(const Vec3& balance, const LookControls& c);
 
 // Everything loaded from disk once and shared by every FilmModel.
 struct FilmResources {
@@ -51,15 +59,25 @@ class FilmModel {
   // Log E span of the negative's digitised H&D curve for layer `ch` (0 = red).
   std::array<double, 2> negativeLogERange(int ch) const;
 
+  // Negative Status M density -> exposure on each print layer, with no printer-light offsets.
+  Vec3 printLogExposureBase(const Vec3& negStatusMDensity) const;
+  // Print Status A density from the print's H&D curves.
+  Vec3 printDensity(const Vec3& printLogE) const;
+  // Projector light through the print dyes -> D65 -> Rec.709 -> grey anchor -> BT.1886 code.
+  Vec3 displayFromPrintDensity(const Vec3& printStatusADensity) const;
+
+  // Digitised log E span and min..max density of the print's curve for layer `ch` (0 = red).
+  std::array<double, 2> printLogERange(int ch) const;
+  std::array<double, 2> printDensityRange(int ch) const;
+
+  // Log E offsets on the print layers: auto-balance plus the printer controls.
+  Vec3 printerOffsets(const LookControls& c) const;
+
   // Negative Status M density -> Rec.709 display code.
-  Vec3 printOutput(const Vec3& negStatusMDensity) const;
+  Vec3 printOutput(const Vec3& negStatusMDensity, const LookControls& c) const;
 
-  // DI pixel pushed `exposureStops` over/under, through the whole chain.
-  Vec3 evaluate(const Vec3& diCode, double exposureStops) const;
-
-  // Log E offsets applied to the print layers: auto-balance plus the user's printer points.
-  // Exposed for tests and diagnostics.
-  Vec3 printerOffsets() const;
+  // DI pixel pushed `c.exposureStops` over/under, through the whole chain.
+  Vec3 evaluate(const Vec3& diCode, const LookControls& c) const;
   const Vec3& balance() const { return balance_; }
   double anchorScale() const { return anchorScale_; }
 

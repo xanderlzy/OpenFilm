@@ -21,6 +21,8 @@ class PrintModel {
   // Colour of the projected print: D55 light through the print's dyes. Y = 1 would be an
   // open gate (no film at all).
   Xyz projectedXyz(const Vec3& printLogE) const;
+  // Same, starting from the print's Status A density instead of its exposure.
+  Xyz projectedXyzFromDensity(const Vec3& printStatusADensity) const;
 
   // Status A density of the print for these exposures.
   Vec3 printDensity(const Vec3& printLogE) const;

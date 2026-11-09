@@ -114,7 +114,7 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, 
     dHi[c] = double(*mm.second) + 0.02;
   }
   Lut3D lutP(lutSizeP, dLo, dHi);
-  lutP.bake([&](const Vec3& d) { return model.printOutput(d); });
+  lutP.bake([&](const Vec3& d) { return model.printOutput(d, LookControls{}); });
   return std::make_shared<const BakedFilm>(BakedFilm{std::move(lutE), std::move(curves), std::move(lutP)});
 }
 

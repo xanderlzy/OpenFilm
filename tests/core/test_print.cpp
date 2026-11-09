@@ -57,3 +57,15 @@ TEST_CASE("printer lamp has a Wratten 2B-style UV cut") {
     if (nm >= 420) CHECK(lamp[i] == doctest::Approx(raw[i]));
   }
 }
+
+TEST_CASE("projected XYZ from density matches from log E") {
+  const PrintModel m = fx().model();
+  for (int i = 0; i < 20; ++i) {
+    const double t = -3.0 + 0.2 * i;
+    const Vec3 e{t, t + 0.1, t - 0.1};
+    const Xyz a = m.projectedXyz(e), b = m.projectedXyzFromDensity(m.printDensity(e));
+    CHECK(a.X == b.X);
+    CHECK(a.Y == b.Y);
+    CHECK(a.Z == b.Z);
+  }
+}

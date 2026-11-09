@@ -25,9 +25,10 @@ FilmParams params(double r = 0) {
   FilmParams p;
   p.negativeId = "kodak-5219-type";
   p.printId = "kodak-2383-type";
-  p.printerLights = {r, 0, 0};
+  p.gamutCompression = 0.5 + 0.1 * r;  // a distinct look per `r`; printer lights no longer enter the bake
   return p;
 }
+LookControls look(double stops) { LookControls c; c.exposureStops = stops; return c; }
 FilmCache& cache() {
   static FilmCache c(res());
   return c;
@@ -122,7 +123,7 @@ TEST_CASE("baked matches direct within DeltaE2000 0.5") {
   for (int i = 0; i < 2000; ++i) {
     const Vec3 in{u(rng), u(rng), u(rng)};
     const double stops = ue(rng);
-    const Vec3 direct = model.evaluate(in, stops);
+    const Vec3 direct = model.evaluate(in, look(stops));
     const Vec3 baked = renderOne(*film, float(in[0]), float(in[1]), float(in[2]), stops);
     const double de = deltaE2000(toLab(direct), toLab(baked));
     all.push_back(de);
@@ -149,7 +150,7 @@ TEST_CASE("baked matches direct in the deep shadows with exposure pushed") {
   for (int i = 0; i < 3000; ++i) {
     const Vec3 in{u(rng), u(rng), u(rng)};
     const double stops = ue(rng);
-    const double de = deltaE2000(toLab(model.evaluate(in, stops)),
+    const double de = deltaE2000(toLab(model.evaluate(in, look(stops))),
                                  toLab(renderOne(*film, float(in[0]), float(in[1]), float(in[2]), stops)));
     maxDe = std::max(maxDe, de);
   }
@@ -157,7 +158,7 @@ TEST_CASE("baked matches direct in the deep shadows with exposure pushed") {
     for (double stops : {-5.0, -2.0, 0.0, 2.0, 4.0, 5.0}) {
       const double v = 0.03 * i / 60;  // neutral ramp from black to DI 0.03
       const Vec3 in{v, v, v};
-      maxGrey = std::max(maxGrey, deltaE2000(toLab(model.evaluate(in, stops)),
+      maxGrey = std::max(maxGrey, deltaE2000(toLab(model.evaluate(in, look(stops))),
                                              toLab(renderOne(*film, float(v), float(v), float(v), stops))));
     }
   std::printf("dark random max dE2000 %.4f, dark grey ramp max %.4f\n", maxDe, maxGrey);

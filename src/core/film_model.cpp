@@ -1,5 +1,6 @@
 #include "core/film_model.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -36,8 +37,6 @@ uint64_t FilmParams::hash() const {
   Fnv f;
   f.str(negativeId); f.str(printId);
   f.num(gamutCompression);
-  for (double v : printerLights) f.num(v);
-  f.num(printDensity);
   return f.h;
 }
 
@@ -125,25 +124,52 @@ std::array<double, 2> FilmModel::negativeLogERange(int ch) const {
   return {c.minLogE(), c.maxLogE()};
 }
 
-Vec3 FilmModel::printerOffsets() const {
+Vec3 printOffsetsLogE(const Vec3& balance, const LookControls& c) {
+  auto finite = [](double v) { return std::isfinite(v) ? v : 0.0; };
   Vec3 off;
   for (int j = 0; j < 3; ++j)
-    off[j] = balance_[j] + kPrinterPoint * (params_.printerLights[j] + params_.printDensity);
+    off[j] = balance[j] + kPrinterPoint * (finite(c.printerPoints[j]) + finite(c.printDensity));
   return off;
 }
 
-Vec3 FilmModel::printOutput(const Vec3& negStatusMDensity) const {
-  const Vec3 off = printerOffsets();
-  const Xyz c = adaptedXyz(negStatusMDensity, off);
-  const Vec3 rgb = mul(toRec709_, Vec3{c.X, c.Y, c.Z});
+std::array<double, 2> FilmModel::printLogERange(int ch) const {
+  const Curve& c = print_.stock().curve[size_t(ch)];
+  return {c.minLogE(), c.maxLogE()};
+}
+
+std::array<double, 2> FilmModel::printDensityRange(int ch) const {
+  const auto& d = print_.stock().curve[size_t(ch)].density;
+  return {*std::min_element(d.begin(), d.end()), *std::max_element(d.begin(), d.end())};
+}
+
+Vec3 FilmModel::printerOffsets(const LookControls& c) const { return printOffsetsLogE(balance_, c); }
+
+Vec3 FilmModel::printLogExposureBase(const Vec3& negStatusMDensity) const {
+  return print_.printLogExposure(negative_.transmittanceDensity(negStatusMDensity), {0, 0, 0});
+}
+
+Vec3 FilmModel::printDensity(const Vec3& printLogE) const { return print_.printDensity(printLogE); }
+
+Vec3 FilmModel::displayFromPrintDensity(const Vec3& printStatusADensity) const {
+  const Xyz p = print_.projectedXyzFromDensity(printStatusADensity);
+  const Vec3 a = mul(adapt_, Vec3{p.X, p.Y, p.Z});
+  const Vec3 rgb = mul(toRec709_, a);
   return {bt1886Encode(rgb[0] * anchorScale_), bt1886Encode(rgb[1] * anchorScale_),
           bt1886Encode(rgb[2] * anchorScale_)};
 }
 
-Vec3 FilmModel::evaluate(const Vec3& diCode, double exposureStops) const {
+Vec3 FilmModel::printOutput(const Vec3& negStatusMDensity, const LookControls& c) const {
+  Vec3 e = printLogExposureBase(negStatusMDensity);
+  const Vec3 off = printerOffsets(c);
+  for (int j = 0; j < 3; ++j) e[j] += off[j];
+  return displayFromPrintDensity(printDensity(e));
+}
+
+Vec3 FilmModel::evaluate(const Vec3& diCode, const LookControls& c) const {
   Vec3 e = negative_.logExposure(diCode);
-  for (double& v : e) v += exposureStops * std::log10(2.0);
-  return printOutput(negative_.density(e));
+  const double stops = std::isfinite(c.exposureStops) ? c.exposureStops : 0.0;
+  for (double& v : e) v += stops * std::log10(2.0);
+  return printOutput(negative_.density(e), c);
 }
 
 }  // namespace openfilm

@@ -48,7 +48,11 @@ Vec3 PrintModel::printDensity(const Vec3& printLogE) const {
 }
 
 Xyz PrintModel::projectedXyz(const Vec3& printLogE) const {
-  Vec3 amounts = dyeAmountsForDensity(statusA_, stock_.dye, stock_.base, printDensity(printLogE));
+  return projectedXyzFromDensity(printDensity(printLogE));
+}
+
+Xyz PrintModel::projectedXyzFromDensity(const Vec3& printStatusADensity) const {
+  Vec3 amounts = dyeAmountsForDensity(statusA_, stock_.dye, stock_.base, printStatusADensity);
   // Negative dye is unphysical; unreachable density asks for it, so clip.
   for (double& a : amounts) a = std::max(a, 0.0);
   const Spectrum d = spectralDensity(stock_.dye, stock_.base, amounts);
