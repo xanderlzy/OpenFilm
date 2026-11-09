@@ -51,7 +51,9 @@ id<MTLBuffer> upload(id<MTLDevice> device, const std::vector<float>& v) {
 struct GpuFilm {
     std::weak_ptr<const BakedFilm> owner;  // expires when the bake is dropped
     id<MTLBuffer> lutE, lutPE, lutD, curves;
-    id<MTLBuffer> lutEHalf;  // lutE as half (its values are exact in half), for the spatial path
+    // The spatial path's copies, one 4-lane node per table entry (the 4th lane unused) so a corner
+    // is one load: lutE as half (its values are exact in half), lutPE and lutD as float.
+    id<MTLBuffer> lutE4h, lutPE4, lutD4;
     OFLut3D descE, descPE, descD;
     OFCurve neg[3], print[3];
 };
@@ -61,9 +63,18 @@ std::shared_ptr<GpuFilm> uploadFilm(id<MTLDevice> device, const std::shared_ptr<
     g->owner = film;
     g->lutE = upload(device, film->lutE.data());
     {
-        std::vector<_Float16> h(film->lutE.data().begin(), film->lutE.data().end());
-        g->lutEHalf = [device newBufferWithBytes:h.data() length:h.size() * sizeof(_Float16)
-                                         options:MTLResourceStorageModeShared];
+        const auto& e = film->lutE.data();
+        std::vector<_Float16> h(e.size() / 3 * 4, _Float16(0.0f));
+        for (size_t i = 0; i < e.size(); ++i) h[i / 3 * 4 + i % 3] = _Float16(e[i]);
+        g->lutE4h = [device newBufferWithBytes:h.data() length:h.size() * sizeof(_Float16)
+                                       options:MTLResourceStorageModeShared];
+        const auto pad = [&](const std::vector<float>& v) {
+            std::vector<float> p(v.size() / 3 * 4, 0.0f);
+            for (size_t i = 0; i < v.size(); ++i) p[i / 3 * 4 + i % 3] = v[i];
+            return upload(device, p);
+        };
+        g->lutPE4 = pad(film->lutPE.data());
+        g->lutD4 = pad(film->lutD.data());
     }
     g->lutPE = upload(device, film->lutPE.data());
     g->lutD = upload(device, film->lutD.data());
@@ -79,7 +90,7 @@ std::shared_ptr<GpuFilm> uploadFilm(id<MTLDevice> device, const std::shared_ptr<
     for (int c = 0; c < 3; ++c) g->neg[c] = add(film->negCurves[size_t(c)]);
     for (int c = 0; c < 3; ++c) g->print[c] = add(film->printCurves[size_t(c)]);
     g->curves = upload(device, packed);
-    if (!g->lutE || !g->lutPE || !g->lutD || !g->curves) return nullptr;
+    if (!g->lutE || !g->lutPE || !g->lutD || !g->curves || !g->lutE4h || !g->lutPE4 || !g->lutD4) return nullptr;
     return g;
 }
 
@@ -103,18 +114,18 @@ void dispatch(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pso,
     [enc dispatchThreads:MTLSizeMake(NSUInteger(w), NSUInteger(h), 1) threadsPerThreadgroup:threadgroupFor(pso)];
 }
 
-// The intermediate images of one spatial render: three full-size work images (two the stages
-// ping-pong between, one for a separate horizontal blur pass), and at reduced resolution three
+// The intermediate images of one spatial render: four full-size work images (two the stages
+// ping-pong between, two for separate horizontal blur passes, T and T2), and at reduced resolution three
 // scratch images (box down, box down by twice the factor, horizontal blur) plus one that holds every
 // reduced lobe's result for the fused pass that reads them.
 struct WorkSet {
     uintptr_t device = 0;
     // Capacity: full and scratch images in pixels (three float planes each), the results in floats.
     size_t fullPx = 0, smallPx = 0, resPx = 0;
-    id<MTLBuffer> full[3];
+    id<MTLBuffer> full[4];
     id<MTLBuffer> small[4];  // scratch x 3, results
 
-    size_t bytes() const { return (3 * (3 * fullPx + 3 * smallPx) + resPx) * sizeof(float); }
+    size_t bytes() const { return (3 * (4 * fullPx + 3 * smallPx) + resPx) * sizeof(float); }
 };
 
 // Per-device pool of WorkSets, shared by every render thread. A render takes a set big enough for
@@ -217,13 +228,14 @@ private:
 
 // The spatial chain as a list of GPU passes, built on the host from the CPU's own lobes, sigmas and
 // taps (film_spatial.cpp, blur.cpp), then encoded in order. Buffers are named by slot.
-enum Slot { kFull0, kFull1, kFull2, kSmall0, kSmall1, kSmall2, kSmallRes, kDst };
+enum Slot { kFull0, kFull1, kFull2, kFull3, kSmall0, kSmall1, kSmall2, kSmallRes, kDst };
 
 struct Pass {
     enum Kind { BoxDown, BoxDown2, BlurHTiled, BlurHBlock, BlurV, Up, Fused } kind;
     int in = -1, out = -1, out2 = -1;  // slots (out2: BoxDown2's 2f result)
     size_t inOffset = 0, outOffset = 0;  // floats into `in` / `out` (reduced results)
     OFPassUniforms u{};
+    OFPassUniforms u2{};               // BlurHTiled: a second blur from the same tile (radius -1: none)
     size_t tileBytes = 0;              // BlurHTiled: threadgroup memory
     const char* stage = "";            // for profiling
     // Fused: uniforms, shape (function constants) and its pipeline.
@@ -248,6 +260,8 @@ struct Stage {
 // Default for MetalRenderer::setDirectBlurLimit: at UHD Super 35 the negative's finest scatter lobe
 // (about 19 reads) is computed in the fused pass, its wider one (54) and the edge blurs are not.
 constexpr int kDefaultDirectLimit = 24;
+// A DIRECT lobe at least this costly moves to the second T buffer when the fused pass has one PRE_H.
+constexpr int kPromoteCost = 12;
 
 class SpatialPlan {
 public:
@@ -261,26 +275,52 @@ public:
     // Encodes `st` reading slot `img`; the result goes to `other` (or dst when it finishes).
     void stage(const Stage& st, int img, int other) {
         stage_ = st.name;
-        const size_t n = st.lobes.size();
+        // spread() runs each lobe's channels in groups that share a downsample factor (lobeGroups);
+        // each group is one lobe here, holding only its channels (and only those the stage uses).
+        struct Sub {
+            PxLobe lobe;
+            std::array<float, 3> w;
+            int mask;
+        };
+        std::vector<Sub> sub;
+        std::vector<int> factor;
+        for (size_t i = 0; i < st.lobes.size(); ++i)
+            for (const LobeGroup& g : lobeGroups(st.lobes[i])) {
+                const int mask = g.mask & ((1 << st.channels) - 1);
+                if (mask == 0) continue;  // channels the stage never reads
+                sub.push_back({st.lobes[i], st.weights[i], mask});
+                factor.push_back(g.factor);
+            }
+        const size_t n = sub.size();
         // How each lobe runs: REDUCED when downsampled; at full resolution DIRECT while its
         // horizontal pass is cheap to redo per column block (directCost), else PRE_H.
-        std::vector<int> kind(n), factor(n);
-        for (size_t i = 0; i < n; ++i) {
-            const PxLobe& lobe = st.lobes[i];
-            factor[i] = downsampleFactor(std::min({lobe.sigmaPx[0], lobe.sigmaPx[1], lobe.sigmaPx[2]}));
+        std::vector<int> kind(n);
+        for (size_t i = 0; i < n; ++i)
             kind[i] = factor[i] > 1 ? OF_LOBE_REDUCED
-                      : directCost(lobe, st.channels) <= directLimit_ ? OF_LOBE_DIRECT
-                                                                      : OF_LOBE_PRE_H;
-        }
-        // The fused pass takes the longest tail of lobes it can (OF_MAX_LOBES, one PRE_H: there is
-        // one T buffer); the lobes before it are summed into `other` by separate passes, as spread()
+                      : directCost(sub[i].lobe, sub[i].mask) <= directLimit_ ? OF_LOBE_DIRECT
+                                                                             : OF_LOBE_PRE_H;
+        // The fused pass takes the longest tail of lobes it can (OF_MAX_LOBES, two PRE_H: there are
+        // two T buffers); the lobes before it are summed into `other` by separate passes, as spread()
         // does, and the fused pass continues that sum and overwrites it with its result.
         size_t first = n;
         int preH = 0;
         while (first > 0 && n - first < OF_MAX_LOBES) {
-            if (kind[first - 1] == OF_LOBE_PRE_H && preH++ == 1) break;
+            if (kind[first - 1] == OF_LOBE_PRE_H && preH++ == 2) break;
             --first;
         }
+        // A tail with one PRE_H and a DIRECT lobe that is not nearly free: its horizontal pass is
+        // cheaper done once, in the same pass as the PRE_H one's (one read of the image), than per
+        // column block (measured at UHD: negative scatter's r = 1,2,2 lobe, cost 19, gains ~1 ms;
+        // print scatter's r = 0,0,1, cost 6, loses ~0.4 ms).
+        if (preH == 1)
+            for (size_t i = first; i < n; ++i)
+                if (kind[i] == OF_LOBE_DIRECT && directCost(sub[i].lobe, sub[i].mask) >= kPromoteCost) {
+                    kind[i] = OF_LOBE_PRE_H;
+                    break;
+                }
+        // The tail's first PRE_H lobe reads T (kFull2), its second T2 (kFull3).
+        for (size_t i = first, k = 0; i < n; ++i)
+            if (kind[i] == OF_LOBE_PRE_H && k++ == 1) kind[i] = OF_LOBE_PRE_H2;
 
         // Every reduced lobe first, each blurred into its own place in kSmallRes. One pair of
         // factors f and 2f is boxed down in one read (bloom's and halation's two lobes are).
@@ -293,28 +333,33 @@ public:
                     pa = factor[i] < factor[j] ? i : j;
                     pb = pa == i ? j : i;
                 }
-        if (pa < n) box2(img, factor[pa]);
+        if (pa < n) {
+            int mask = 0;  // the channels any lobe at either factor needs
+            for (size_t i = 0; i < n; ++i)
+                if (factor[i] == factor[pa] || factor[i] == factor[pb]) mask |= sub[i].mask;
+            box2(img, factor[pa], mask);
+        }
         for (int pass = 0; pass < 2; ++pass)  // the paired factors' lobes, then the rest
             for (size_t i = 0; i < n; ++i) {
                 if (factor[i] == 1) continue;
                 const bool paired = pa < n && (factor[i] == factor[pa] || factor[i] == factor[pb]);
                 if (paired != (pass == 0)) continue;
                 resAt[i] = resUsed;
-                reduce(img, paired ? (factor[i] == factor[pa] ? kSmall0 : kSmall2) : -1, st.lobes[i], factor[i],
-                       resUsed, i < first ? 3 : st.channels);
+                reduce(img, paired ? (factor[i] == factor[pa] ? kSmall0 : kSmall2) : -1, sub[i].lobe, factor[i],
+                       resUsed, sub[i].mask);
                 resUsed += 3 * size_t((w_ + factor[i] - 1) / factor[i]) * size_t((h_ + factor[i] - 1) / factor[i]);
             }
         resPx = std::max(resPx, resUsed);
 
         // Prefix: spread() pass by pass, summed into `other`.
         for (size_t i = 0; i < first; ++i) {
-            const PxLobe& lobe = st.lobes[i];
+            const PxLobe& lobe = sub[i].lobe;
             const int mode = i == 0 ? OF_STORE_WEIGHTED : OF_ACCUMULATE;
             if (factor[i] == 1) {
-                OFPassUniforms b = blurUniforms(w_, h_, lobe.sigmaPx, 3);
+                OFPassUniforms b = blurUniforms(w_, h_, lobe.sigmaPx, sub[i].mask);
                 addBlurH(img, kFull2, b);
                 b.mode = mode;
-                setWeight(b, st.weights[i]);
+                setWeight(b, sub[i].w);
                 add(Pass::BlurV, kFull2, other, b);
             } else {
                 OFPassUniforms up = base();
@@ -322,7 +367,8 @@ public:
                 up.inHeight = (h_ + factor[i] - 1) / factor[i];
                 up.factor = factor[i];
                 up.mode = mode;
-                setWeight(up, st.weights[i]);
+                setWeight(up, sub[i].w);
+                for (int c = 0; c < 3; ++c) up.radius[c] = sub[i].mask >> c & 1 ? 0 : -1;
                 add(Pass::Up, kSmallRes, other, up);
                 passes.back().inOffset = resAt[i];
             }
@@ -341,25 +387,32 @@ public:
         fu.width = w_;
         fu.height = h_;
         for (int c = 0; c < 3; ++c) fu.cw[c] = st.cw[size_t(c)];
+        std::vector<OFPassUniforms> preHs;  // the tail's PRE_H lobes' horizontal passes, T then T2
         for (size_t i = first; i < n; ++i) {
-            const PxLobe& lobe = st.lobes[i];
+            const PxLobe& lobe = sub[i].lobe;
             f.kinds |= kind[i] << (2 * f.nLobes);
             OFLobe& L = fu.lobes[f.nLobes++];
-            for (int c = 0; c < 3; ++c) L.weight[c] = st.weights[i][size_t(c)];
+            for (int c = 0; c < 3; ++c) L.weight[c] = sub[i].w[size_t(c)];
             if (kind[i] == OF_LOBE_REDUCED) {
                 const int fct = factor[i];
                 L.factor = fct;
                 L.sw = (w_ + fct - 1) / fct;
                 L.sh = (h_ + fct - 1) / fct;
                 L.smallOffset = int(resAt[i]);
+                for (int c = 0; c < 3; ++c) L.radius[c] = sub[i].mask >> c & 1 ? 0 : -1;
                 continue;
             }
-            const OFPassUniforms b = blurUniforms(w_, h_, lobe.sigmaPx, st.channels);
+            const OFPassUniforms b = blurUniforms(w_, h_, lobe.sigmaPx, sub[i].mask);
             for (int c = 0; c < 3; ++c) {
                 L.radius[c] = b.radius[c];
                 L.tapOffset[c] = b.tapOffset[c];
             }
-            if (kind[i] == OF_LOBE_PRE_H) addBlurH(img, kFull2, b);
+            if (kind[i] != OF_LOBE_DIRECT) preHs.push_back(b);
+        }
+        if (preHs.size() == 2 && tiledFits(preHs[0], preHs[1])) {
+            addBlurH(img, kFull2, preHs[0], &preHs[1], kFull3);  // both from one tile
+        } else {
+            for (size_t k = 0; k < preHs.size(); ++k) addBlurH(img, k == 0 ? kFull2 : kFull3, preHs[k]);
         }
         f.stage = stage_;
         passes.push_back(f);
@@ -377,9 +430,10 @@ private:
 
     // Image reads per output pixel of a DIRECT lobe: each column block of OF_BLOCK pixels computes
     // OF_BLOCK + 2r horizontal sums of 2r + 1 taps per channel.
-    static int directCost(const PxLobe& lobe, int channels) {
+    static int directCost(const PxLobe& lobe, int mask) {
         int n = 0;
-        for (int c = 0; c < channels; ++c) {
+        for (int c = 0; c < 3; ++c) {
+            if (!(mask >> c & 1)) continue;
             const int r = blurRadiusPx(lobe.sigmaPx[size_t(c)]);
             n += (OF_BLOCK + 2 * r) * (2 * r + 1);
         }
@@ -394,15 +448,15 @@ private:
         return u;
     }
 
-    // Taps of the first `channels` channels (the others get radius 0 and are not used).
-    OFPassUniforms blurUniforms(int w, int h, const std::array<float, 3>& sigma, int channels) {
+    // Taps of the channels in `mask` (the others get radius -1: not computed).
+    OFPassUniforms blurUniforms(int w, int h, const std::array<float, 3>& sigma, int mask) {
         OFPassUniforms u{};
         u.width = u.inWidth = w;
         u.height = u.inHeight = h;
         u.factor = 1;
         u.mode = OF_STORE;
         for (int c = 0; c < 3; ++c) {
-            u.radius[c] = c < channels ? blurRadiusPx(sigma[size_t(c)]) : 0;
+            u.radius[c] = mask >> c & 1 ? blurRadiusPx(sigma[size_t(c)]) : -1;
             u.tapOffset[c] = int(taps.size());
             if (u.radius[c] > 0) {
                 const std::vector<float> t = blurTaps(sigma[size_t(c)]);
@@ -413,20 +467,21 @@ private:
     }
 
     // Box down of `img` by f into kSmall0 and by 2f into kSmall2, one read.
-    void box2(int img, int f) {
+    void box2(int img, int f, int mask) {
         const int sw = (w_ + 2 * f - 1) / (2 * f), sh = (h_ + 2 * f - 1) / (2 * f);
         smallPx = std::max(smallPx, size_t((w_ + f - 1) / f) * size_t((h_ + f - 1) / f));
         OFPassUniforms box = base();
         box.width = sw;
         box.height = sh;
         box.factor = f;
+        for (int c = 0; c < 3; ++c) box.radius[c] = mask >> c & 1 ? 0 : -1;  // channels to box
         add(Pass::BoxDown2, img, kSmall0, box);
         passes.back().out2 = kSmall2;
     }
 
     // Box down `img` by f (unless already boxed into `boxed`), then blur with the lobe's reduced
     // sigmas into kSmallRes at `offset`.
-    void reduce(int img, int boxed, const PxLobe& lobe, int f, size_t offset, int channels) {
+    void reduce(int img, int boxed, const PxLobe& lobe, int f, size_t offset, int mask) {
         const int sw = (w_ + f - 1) / f, sh = (h_ + f - 1) / f;
         smallPx = std::max(smallPx, size_t(sw) * size_t(sh));
         if (boxed < 0) {
@@ -434,30 +489,42 @@ private:
             box.width = sw;
             box.height = sh;
             box.factor = f;
+            for (int c = 0; c < 3; ++c) box.radius[c] = mask >> c & 1 ? 0 : -1;  // channels to box
             add(Pass::BoxDown, img, kSmall0, box);
             boxed = kSmall0;
         }
         std::array<float, 3> s;
         for (size_t c = 0; c < 3; ++c) s[c] = reducedSigmaPx(lobe.sigmaPx[c], f);
-        OFPassUniforms b = blurUniforms(sw, sh, s, channels);
+        OFPassUniforms b = blurUniforms(sw, sh, s, mask);
         addBlurH(boxed, kSmall1, b);
         b.mode = OF_STORE;
         add(Pass::BlurV, kSmall1, kSmallRes, b);
         passes.back().outOffset = offset;
     }
 
-    // Horizontal blur: from threadgroup memory for small radii, else register-blocked.
-    void addBlurH(int in, int out, const OFPassUniforms& u) {
+    // Threadgroup memory of a tiled horizontal pass of u (and u2), or 0 when it should not be tiled.
+    size_t tileBytes(const OFPassUniforms& u, const OFPassUniforms& u2) const {
         size_t n = 0;
         int rmax = 0;
         for (int c = 0; c < 3; ++c) {
-            n += size_t(OF_HTILE + 2 * u.radius[c]);
-            rmax = std::max(rmax, u.radius[c]);
+            const int R = std::max(u.radius[c], u2.radius[c]);
+            if (R >= 0) n += size_t(OF_HTILE + 2 * R);
+            rmax = std::max(rmax, R);
         }
-        const bool tiled = rmax < kTiledHMaxRadius && n * sizeof(float) <= tgLimit_;
-        add(tiled ? Pass::BlurHTiled : Pass::BlurHBlock, in, out, u);
-        if (tiled) passes.back().tileBytes = n * sizeof(float);
+        return rmax < kTiledHMaxRadius && n * sizeof(float) <= tgLimit_ ? n * sizeof(float) : 0;
     }
+    bool tiledFits(const OFPassUniforms& u, const OFPassUniforms& u2) const { return tileBytes(u, u2) > 0; }
+
+    // Horizontal blur: from threadgroup memory for small radii, else register-blocked. With u2, a
+    // second blur of the same image into out2 from the same tile (the caller checked tiledFits).
+    void addBlurH(int in, int out, const OFPassUniforms& u, const OFPassUniforms* u2 = nullptr, int out2 = -1) {
+        const size_t bytes = tileBytes(u, u2 ? *u2 : kNoChannels);
+        add(bytes ? Pass::BlurHTiled : Pass::BlurHBlock, in, out, u);
+        passes.back().tileBytes = bytes;
+        passes.back().u2 = u2 ? *u2 : kNoChannels;
+        passes.back().out2 = u2 ? out2 : -1;
+    }
+    static constexpr OFPassUniforms kNoChannels = {0, 0, 0, 0, 1, 0, {-1, -1, -1}, {0, 0, 0}, {0.f, 0.f, 0.f}};
     static constexpr int kTiledHMaxRadius = 16;  // measured crossover at UHD
 
     static void setWeight(OFPassUniforms& u, const std::array<float, 3>& w) {
@@ -485,7 +552,7 @@ std::string passName(const Pass& p, int gw, int gh) {
     if (p.kind == Pass::BoxDown || p.kind == Pass::Up) n += " f=" + std::to_string(p.u.factor);
     if (p.kind == Pass::BoxDown2) n += " f=" + std::to_string(p.u.factor) + "," + std::to_string(2 * p.u.factor);
     if (p.kind == Pass::Fused) {
-        static const char* kKinds[] = {"direct", "preH", "reduced"};
+        static const char* kKinds[] = {"direct", "preH", "reduced", "preH2"};
         n += " lobes:";
         for (int l = 0; l < p.nLobes; ++l) n += std::string(" ") + kKinds[(p.kinds >> (2 * l)) & 3];
         if (p.sum >= 0) n += " +sum";
@@ -848,7 +915,7 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                                  [enc setBuffer:src offset:0 atIndex:0];
                                  [enc setBuffer:slot(kFull0) offset:0 atIndex:1];
                                  [enc setBytes:&u length:sizeof(u) atIndex:2];
-                                 [enc setBuffer:g->lutEHalf offset:0 atIndex:3];
+                                 [enc setBuffer:g->lutE4h offset:0 atIndex:3];
                                  dispatch(enc, pl.expose, W, H);
                              }});
             for (const Pass& p : plan.passes)
@@ -875,10 +942,11 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                     [enc setBuffer:slot(kFull2) offset:0 atIndex:4];
                     [enc setBuffer:slot(kSmallRes) offset:0 atIndex:5];
                     [enc setBuffer:slot(p.sum >= 0 ? p.sum : kFull2) offset:0 atIndex:6];
+                    [enc setBuffer:slot(kFull3) offset:0 atIndex:13];
                     [enc setBytes:&u length:sizeof(u) atIndex:7];
                     [enc setBuffer:g->curves offset:0 atIndex:8];
-                    [enc setBuffer:g->lutPE offset:0 atIndex:9];
-                    [enc setBuffer:g->lutD offset:0 atIndex:10];
+                    [enc setBuffer:g->lutPE4 offset:0 atIndex:9];
+                    [enc setBuffer:g->lutD4 offset:0 atIndex:10];
                     [enc setBuffer:src offset:0 atIndex:11];
                     [enc setBuffer:dst offset:0 atIndex:12];
                     // One thread per OF_BLOCK pixels of a column.
@@ -905,6 +973,8 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                     [enc setBytes:&p.u length:sizeof(p.u) atIndex:2];
                     [enc setBuffer:tapsBuf offset:0 atIndex:3];
                     if (p.kind == Pass::BlurHTiled) {
+                        [enc setBuffer:slot(p.out2 >= 0 ? p.out2 : p.out) offset:0 atIndex:4];
+                        [enc setBytes:&p.u2 length:sizeof(p.u2) atIndex:5];
                         [enc setComputePipelineState:pl.blurHTiled];
                         [enc setThreadgroupMemoryLength:(p.tileBytes + 15) / 16 * 16 atIndex:0];
                         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger(p.u.width) + OF_HTILE - 1) / OF_HTILE,

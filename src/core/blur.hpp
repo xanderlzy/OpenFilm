@@ -22,7 +22,8 @@ struct PxLobe {
 };
 
 // out[c] = sum over lobes of weight * (G_{sigmaPx[c]} * in)[c] for c < 3; alpha copied. Clamp-to-edge at borders.
-// Lobes with sigma > 4 px are computed at reduced resolution (factor from the lobe's smallest sigma). `out` must not alias `in`.
+// Each channel of a lobe with sigma > 4 px is computed at reduced resolution, at its own downsampleFactor(sigma_c)
+// (lobeGroups). `out` must not alias `in`.
 void spread(const Image4f& in, Image4f& out, const std::vector<PxLobe>& lobes);
 
 // One lobe's blur of RGB at full resolution (alpha copied). Taps exp(-i^2/(2 s^2)), |i| <= blurRadiusPx(s), normalised,
@@ -41,5 +42,12 @@ std::vector<float> blurTaps(float sigmaPx);
 // Sigma (coarse px) that, after the f x f box down and the bilinear up, gives sigmaPx at full resolution.
 float reducedSigmaPx(float sigmaPx, int f);
 int downsampleFactor(float sigmaPx);  // 1 if sigma <= 4, else largest power of two f <= 32 with sigma / f >= 2
+
+// The channels of one lobe that share a downsample factor (mask bit c = channel c), in order of their first channel.
+struct LobeGroup {
+  int factor;
+  int mask;
+};
+std::vector<LobeGroup> lobeGroups(const PxLobe& lobe);
 
 }  // namespace openfilm

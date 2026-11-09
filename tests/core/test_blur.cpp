@@ -79,6 +79,56 @@ TEST_CASE("per-channel sigmas") {
   }
 }
 
+// Second moment along x of channel c's response to a centred point, over sigma^2.
+double secondMomentRatio(const Image4f& out, int c, float sigma) {
+  const int n = out.width;
+  double m0 = 0, m2 = 0;
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const double v = out.at(x, y)[c];
+      m0 += v;
+      m2 += v * (double(x - n / 2) * (x - n / 2));
+    }
+  return m2 / m0 / (double(sigma) * sigma);
+}
+
+TEST_CASE("each channel runs at its own downsample factor") {
+  SUBCASE("all three reduced, each at its own factor") {
+    const PxLobe lobe{1.f, {10.f, 20.f, 40.f}};
+    const auto g = lobeGroups(lobe);
+    REQUIRE(g.size() == 3);
+    CHECK((g[0].factor == 4 && g[0].mask == 1));
+    CHECK((g[1].factor == 8 && g[1].mask == 2));
+    CHECK((g[2].factor == 16 && g[2].mask == 4));
+    const int n = 513;
+    Image4f in = makeImage(n, n), out;
+    float* p = in.at(n / 2, n / 2);
+    p[0] = p[1] = p[2] = 1.f;
+    spread(in, out, {lobe});
+    for (int c = 0; c < 3; ++c) CHECK(std::abs(secondMomentRatio(out, c, lobe.sigmaPx[size_t(c)]) - 1.0) < 0.03);
+  }
+  SUBCASE("mixed: only the wide channel is reduced") {
+    const PxLobe lobe{1.f, {1.f, 4.f, 40.f}};
+    const auto g = lobeGroups(lobe);
+    REQUIRE(g.size() == 2);
+    CHECK((g[0].factor == 1 && g[0].mask == 3));
+    CHECK((g[1].factor == 16 && g[1].mask == 4));
+    const int n = 513;
+    Image4f in = makeImage(n, n), out, full;
+    float* p = in.at(n / 2, n / 2);
+    p[0] = p[1] = p[2] = 1.f;
+    spread(in, out, {lobe});
+    for (int c = 0; c < 3; ++c) CHECK(std::abs(secondMomentRatio(out, c, lobe.sigmaPx[size_t(c)]) - 1.0) < 0.03);
+    // The narrow channels are exactly the full-resolution blur.
+    gaussianBlur(in, full, {1.f, 4.f, 0.f});
+    bool same = true;
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x)
+        for (int c = 0; c < 2; ++c) same = same && out.at(x, y)[c] == full.at(x, y)[c];
+    CHECK(same);
+  }
+}
+
 TEST_CASE("kernel larger than image") {
   for (auto dims : {std::pair<int, int>{64, 36}, std::pair<int, int>{1, 1}}) {
     Image4f in = makeImage(dims.first, dims.second), out;

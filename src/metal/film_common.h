@@ -24,7 +24,13 @@ inline bool inside(OFImageGeom g, int x, int y) { return x >= g.x1 && x < g.x2 &
 
 // Lut3D::lookup: clamp into the table's domain, find the cell, tetrahedral interpolation. The node
 // values may be stored as float or as half (a table whose values are exact in half; see
-// BakedFilm::lutE); either way the interpolation runs in float.
+// BakedFilm::lutE), three per node (T scalar) or padded to four (T a 4-vector, one load per
+// corner); either way the interpolation runs in float, channel by channel, in the same order.
+template <typename T>
+inline float nodeValue(device const T* data, uint node, int k) { return float(data[node * 3 + k]); }
+inline float nodeValue(device const half4* data, uint node, int k) { return float(data[node][k]); }
+inline float nodeValue(device const float4* data, uint node, int k) { return data[node][k]; }
+
 template <typename T>
 float3 lookup(device const T* data, constant OFLut3D& L, float3 in) {
     const int n = L.size;
@@ -39,7 +45,7 @@ float3 lookup(device const T* data, constant OFLut3D& L, float3 in) {
         i0[k] = i;
         f[k] = u - float(i);
     }
-    const uint sr = 3, sg = uint(n) * 3, sb = uint(n) * uint(n) * 3;
+    const uint sr = 1, sg = uint(n), sb = uint(n) * uint(n);  // in nodes
     const uint stride[3] = {sr, sg, sb};
     const uint base = uint(i0[2]) * sb + uint(i0[1]) * sg + uint(i0[0]) * sr;
 
@@ -56,7 +62,8 @@ float3 lookup(device const T* data, constant OFLut3D& L, float3 in) {
     const float w0 = 1.0f - f[o0], w1 = f[o0] - f[o1], w2 = f[o1] - f[o2], w3 = f[o2];
     float3 out;
     for (int k = 0; k < 3; ++k)
-        out[k] = w0 * float(data[p0 + k]) + w1 * float(data[p1 + k]) + w2 * float(data[p2 + k]) + w3 * float(data[p3 + k]);
+        out[k] = w0 * nodeValue(data, p0, k) + w1 * nodeValue(data, p1, k) + w2 * nodeValue(data, p2, k) +
+                 w3 * nodeValue(data, p3, k);
     return out;
 }
 

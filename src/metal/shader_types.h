@@ -73,7 +73,7 @@ typedef struct {
     int inWidth, inHeight;  // the grid it reads (differs for box down and bilinear up)
     int factor;             // box / bilinear factor f
     int mode;               // OF_STORE..OF_ACCUMULATE; develop: 0 negative, 1 print
-    int radius[3];          // per-channel blur radius (0 = copy)
+    int radius[3];          // per-channel blur radius (0 = copy, -1 = channel not computed by this pass)
     int tapOffset[3];       // where each channel's 2r+1 taps start in the taps buffer
     float weight[3];        // per-channel weight (lobe weight, layer weight, k, h w_c, bloom amount)
 } OFPassUniforms;
@@ -90,9 +90,10 @@ typedef struct {
 #define OF_LOBE_DIRECT 0   // full resolution, small kernel: horizontal pass computed in the fused pass
 #define OF_LOBE_PRE_H 1    // full resolution: horizontal pass already in the T buffer; vertical in the fused pass
 #define OF_LOBE_REDUCED 2  // reduced resolution, already blurred into the small-results buffer; bilinear up here
+#define OF_LOBE_PRE_H2 3   // as PRE_H, from the second T buffer (a stage's second full-resolution lobe)
 
 typedef struct {
-    int radius[3];     // per-channel blur radius (0 = copy); DIRECT / PRE_H
+    int radius[3];     // per-channel blur radius (0 = copy); -1 = channel not in this lobe (any kind)
     int tapOffset[3];  // where each channel's taps start
     float weight[3];   // per-channel weight of this lobe in the sum
     int factor;        // REDUCED: f

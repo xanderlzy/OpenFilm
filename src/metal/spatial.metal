@@ -25,18 +25,23 @@ inline int clampI(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v
 inline bool outside(uint2 gid, int w, int h) { return int(gid.x) >= w || int(gid.y) >= h; }
 
 // Writes v at pixel i of the planar image `out` (plane size n) by the pass mode (OF_STORE /
-// OF_STORE_WEIGHTED / OF_ACCUMULATE).
+// OF_STORE_WEIGHTED / OF_ACCUMULATE). A channel the pass leaves out (radius -1: another of the lobe's
+// downsample groups computes it) is left alone, except that the first lobe of a sum zeroes it, as the
+// CPU's sum starts at 0.
 inline void put(device float* out, int n, int i, float3 v, constant OFPassUniforms& p) {
     for (int c = 0; c < 3; ++c) {
         device float* o = out + c * n + i;
-        if (p.mode == OF_STORE) *o = v[c];
+        if (p.radius[c] < 0) {
+            if (p.mode == OF_STORE_WEIGHTED) *o = 0.0f;
+        } else if (p.mode == OF_STORE) *o = v[c];
         else if (p.mode == OF_STORE_WEIGHTED) *o = p.weight[c] * v[c];
         else *o = *o + p.weight[c] * v[c];
     }
 }
 
-// upAccumulate's bilinear sample of a planar coarse image (sw x sh) at fine pixel (x, y).
-inline float3 upSample(device const float* small, int sw, int sh, int f, int x, int y, int channels) {
+// upAccumulate's bilinear sample of a planar coarse image (sw x sh) at fine pixel (x, y), for the
+// channels in `mask`.
+inline float3 upSample(device const float* small, int sw, int sh, int f, int x, int y, int mask) {
     const float ff = float(f);
     const float fy = (float(y) + 0.5f) / ff - 0.5f;
     const float flY = floor(fy);
@@ -48,7 +53,8 @@ inline float3 upSample(device const float* small, int sw, int sh, int f, int x, 
     const int xa = clampI(int(flX), 0, sw - 1), xb = clampI(int(flX) + 1, 0, sw - 1);
     const int n = sw * sh;
     float3 v = float3(0.0f);
-    for (int c = 0; c < channels; ++c) {
+    for (int c = 0; c < 3; ++c) {
+        if (!(mask >> c & 1)) continue;
         device const float* s = small + c * n;
         const float p00 = s[ya * sw + xa], p10 = s[ya * sw + xb], p01 = s[yb * sw + xa], p11 = s[yb * sw + xb];
         const float top = p00 + (p10 - p00) * tx;
@@ -95,7 +101,7 @@ inline void blurBlock(device const float* pl, constant float* tp, int w, int h, 
 kernel void sp_expose(device const float* src [[buffer(0)]],
                       device float* E [[buffer(1)]],
                       constant OFSpatialUniforms& u [[buffer(2)]],
-                      device const half* lutE [[buffer(3)]],
+                      device const half4* lutE [[buffer(3)]],
                       uint2 gid [[thread_position_in_grid]]) {
     if (outside(gid, u.width, u.height)) return;
     const int x = u.rectX1 + int(gid.x), y = u.rectY1 + int(gid.y);
@@ -112,7 +118,7 @@ kernel void sp_box_down(device const float* in [[buffer(0)]],
                         uint2 gid [[thread_position_in_grid]]) {
     const int c = int(gid.y) / p.height;  // one thread per channel: the grid is 3 planes tall
     const int x = int(gid.x), y = int(gid.y) - c * p.height, f = p.factor, iw = p.inWidth;
-    if (x >= p.width || c >= 3) return;
+    if (x >= p.width || c >= 3 || p.radius[c] < 0) return;  // radius -1: channel not needed
     const int xe = min((x + 1) * f, iw), ye = min((y + 1) * f, p.inHeight);
     device const float* pl = in + c * iw * p.inHeight;
     float s = 0.0f;
@@ -133,7 +139,7 @@ kernel void sp_box_down2(device const float* in [[buffer(0)]],
     const int c = int(gid.y) / p.height;  // one thread per channel: the grid is 3 planes tall
     const int x = int(gid.x), y = int(gid.y) - c * p.height, f = p.factor, f2 = 2 * f, iw = p.inWidth,
               ih = p.inHeight;
-    if (x >= p.width || c >= 3) return;
+    if (x >= p.width || c >= 3 || p.radius[c] < 0) return;  // radius -1: channel not needed
     const int xe = min((x + 1) * f2, iw), ye = min((y + 1) * f2, ih);
     const int w1 = (iw + f - 1) / f, h1 = (ih + f - 1) / f;
     device const float* pl = in + c * iw * ih;
@@ -166,7 +172,8 @@ kernel void sp_up(device const float* small [[buffer(0)]],
                   uint2 gid [[thread_position_in_grid]]) {
     if (outside(gid, p.width, p.height)) return;
     const int x = int(gid.x), y = int(gid.y);
-    const float3 v = upSample(small, p.inWidth, p.inHeight, p.factor, x, y, 3);
+    const int mask = (p.radius[0] >= 0 ? 1 : 0) | (p.radius[1] >= 0 ? 2 : 0) | (p.radius[2] >= 0 ? 4 : 0);
+    const float3 v = upSample(small, p.inWidth, p.inHeight, p.factor, x, y, mask);
     put(out, p.width * p.height, y * p.width + x, v, p);
 }
 
@@ -185,21 +192,43 @@ kernel void sp_finish_empty(device float* dst [[buffer(1)]],
 // ---- Separable blur passes (blurImpl's two halves), same sums in the same order ----
 
 // Horizontal, small radii: OF_HTILE threads per threadgroup, one row segment each. The pixels the
-// taps reach are copied into threadgroup memory once (one plane per channel); radius 0 copies.
+// taps reach are copied into threadgroup memory once (one plane per channel); radius 0 copies. A
+// second blur of the same image (p2, out2: another lobe's) can run from the same tile; a pass
+// without one gives p2 radius -1 everywhere.
+inline void tiledRow(threadgroup const float* row, constant float* taps, constant OFPassUniforms& p, int c,
+                     device float* out, int i) {
+    const int r = p.radius[c];
+    if (r < 0) return;
+    float acc;
+    if (r == 0) {
+        acc = row[0];
+    } else {
+        constant float* tp = taps + p.tapOffset[c] + r;
+        acc = 0.0f;
+        _Pragma("unroll 8") for (int t = -r; t <= r; ++t) acc += tp[t] * row[t];
+    }
+    out[i] = acc;
+}
+
 kernel void sp_blur_h_tiled(device const float* in [[buffer(0)]],
                             device float* out [[buffer(1)]],
                             constant OFPassUniforms& p [[buffer(2)]],
                             constant float* taps [[buffer(3)]],
+                            device float* out2 [[buffer(4)]],
+                            constant OFPassUniforms& p2 [[buffer(5)]],
                             threadgroup float* buf [[threadgroup(0)]],
                             uint2 tid [[thread_position_in_threadgroup]],
                             uint2 tgid [[threadgroup_position_in_grid]]) {
     const int w = p.width, n = w * p.height, y = int(tgid.y), x0 = int(tgid.x) * OF_HTILE, tx = int(tid.x);
     if (y >= p.height) return;  // whole threadgroup
-    int base[3];
+    int base[3], reach[3];
     int total = 0;
     for (int c = 0; c < 3; ++c) {
+        const int R = max(p.radius[c], p2.radius[c]);
         base[c] = total;
-        const int R = p.radius[c], m = OF_HTILE + 2 * R;
+        reach[c] = R;
+        if (R < 0) continue;  // channel not needed
+        const int m = OF_HTILE + 2 * R;
         device const float* row = in + c * n + y * w;
         for (int k = tx; k < m; k += OF_HTILE) buf[total + k] = row[clampI(x0 - R + k, 0, w - 1)];
         total += m;
@@ -208,17 +237,10 @@ kernel void sp_blur_h_tiled(device const float* in [[buffer(0)]],
     const int x = x0 + tx;
     if (x >= w) return;
     for (int c = 0; c < 3; ++c) {
-        const int r = p.radius[c];
-        threadgroup const float* row = buf + base[c] + tx + r;
-        float acc;
-        if (r == 0) {
-            acc = row[0];
-        } else {
-            constant float* tp = taps + p.tapOffset[c] + r;
-            acc = 0.0f;
-            _Pragma("unroll 8") for (int t = -r; t <= r; ++t) acc += tp[t] * row[t];
-        }
-        out[c * n + y * w + x] = acc;
+        if (reach[c] < 0) continue;
+        threadgroup const float* row = buf + base[c] + tx + reach[c];  // this pixel
+        tiledRow(row, taps, p, c, out, c * n + y * w + x);
+        tiledRow(row, taps, p2, c, out2, c * n + y * w + x);
     }
 }
 
@@ -236,6 +258,7 @@ kernel void sp_blur_h_block(device const float* in [[buffer(0)]],
         const int r = p.radius[c];
         device const float* pl = in + c * n;
         device float* o = out + c * n + y * w;
+        if (r < 0) continue;  // channel not needed
         if (r == 0) {
             for (int k = 0; k < OF_HBLOCK && x0 + k < w; ++k) o[x0 + k] = pl[y * w + x0 + k];
             continue;
@@ -260,6 +283,7 @@ kernel void sp_blur_v_block(device const float* in [[buffer(0)]],
     for (int c = 0; c < 3; ++c) {
         const int r = p.radius[c];
         device const float* pl = in + c * n;
+        if (r < 0) continue;  // channel not needed (put leaves it)
         if (r == 0) {
             for (int k = 0; k < OF_BLOCK; ++k) res[c][k] = pl[min(y0 + k, h - 1) * w + x];
             continue;
@@ -283,7 +307,7 @@ constant int fcKinds [[function_constant(5)]];  // 2 bits per lobe, lobe 0 lowes
 // writes pixel i of the planar work image `out` (plane size n), or with finish the display pixel
 // (ix, iy) of dst.
 inline void emitPixel(float3 X, float3 S, constant OFFuseUniforms& fu, constant OFSpatialUniforms& u,
-                      device const float* curves, device const float* lutPE, device const float* lutD,
+                      device const float* curves, device const float4* lutPE, device const float4* lutD,
                       device const float* src, device float* dst, device float* out, int n, int i, int ix,
                       int iy) {
     switch (fcCombine) {
@@ -336,10 +360,11 @@ kernel void sp_fused(device const float* img [[buffer(0)]],
                      device const float* B [[buffer(6)]],
                      constant OFSpatialUniforms& u [[buffer(7)]],
                      device const float* curves [[buffer(8)]],
-                     device const float* lutPE [[buffer(9)]],
-                     device const float* lutD [[buffer(10)]],
+                     device const float4* lutPE [[buffer(9)]],
+                     device const float4* lutD [[buffer(10)]],
                      device const float* src [[buffer(11)]],
                      device float* dst [[buffer(12)]],
+                     device const float* T2 [[buffer(13)]],
                      uint2 gid [[thread_position_in_grid]]) {
     const int W = fu.width, H = fu.height, n = W * H, K = OF_BLOCK;
     const bool finish = (fcPost & OF_POST_FINISH) != 0;
@@ -365,11 +390,13 @@ kernel void sp_fused(device const float* img [[buffer(0)]],
             if (kind != OF_LOBE_REDUCED) {
                 for (int c = 0; c < ch; ++c) {
                     const int r = L.radius[c];
-                    device const float* pl = (kind == OF_LOBE_PRE_H ? T : img) + c * n;
+                    if (r < 0) continue;  // another downsample group of the lobe computes this channel
+                    device const float* pl =
+                        (kind == OF_LOBE_PRE_H ? T : kind == OF_LOBE_PRE_H2 ? T2 : img) + c * n;
                     float v[OF_BLOCK];
                     if (r == 0) {
                         for (int k = 0; k < K; ++k) v[k] = pl[clampI(wy0 + k, 0, H - 1) * W + wx];
-                    } else if (kind == OF_LOBE_PRE_H) {
+                    } else if (kind != OF_LOBE_DIRECT) {
                         blurBlock<1>(pl, taps + L.tapOffset[c] + r, W, H, wx, wy0, r, v);
                     } else {
                         blurBlock<2>(pl, taps + L.tapOffset[c] + r, W, H, wx, wy0, r, v);
@@ -377,9 +404,12 @@ kernel void sp_fused(device const float* img [[buffer(0)]],
                     for (int k = 0; k < K; ++k) S[c][k] = first ? L.weight[c] * v[k] : S[c][k] + L.weight[c] * v[k];
                 }
             } else {
+                int mask = 0;
+                for (int c = 0; c < ch; ++c) mask |= L.radius[c] >= 0 ? 1 << c : 0;
                 for (int k = 0; k < K; ++k) {
-                    const float3 v = upSample(small + L.smallOffset, L.sw, L.sh, L.factor, wx, wy0 + k, ch);
-                    for (int c = 0; c < ch; ++c) S[c][k] = first ? L.weight[c] * v[c] : S[c][k] + L.weight[c] * v[c];
+                    const float3 v = upSample(small + L.smallOffset, L.sw, L.sh, L.factor, wx, wy0 + k, mask);
+                    for (int c = 0; c < ch; ++c)
+                        if (mask >> c & 1) S[c][k] = first ? L.weight[c] * v[c] : S[c][k] + L.weight[c] * v[c];
                 }
             }
         }

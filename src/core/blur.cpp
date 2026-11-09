@@ -107,8 +107,9 @@ void boxDown(const Image4f& in, Image4f& out, int f) {
   });
 }
 
-// Bilinear upsample at fine-pixel centres ((x + 0.5)/f - 0.5), clamp-to-edge; adds weight * result to RGB of acc.
-void upAccumulate(const Image4f& small, Image4f& acc, int f, float weight) {
+// Bilinear upsample at fine-pixel centres ((x + 0.5)/f - 0.5), clamp-to-edge; adds weight * result to the
+// channels of acc in `mask` (bit c = channel c).
+void upAccumulate(const Image4f& small, Image4f& acc, int f, float weight, int mask) {
   const int sw = small.width, sh = small.height;
   parallelRows(acc.height, [&](int y0, int y1) {
     for (int y = y0; y < y1; ++y) {
@@ -127,6 +128,7 @@ void upAccumulate(const Image4f& small, Image4f& acc, int f, float weight) {
         const float* p11 = small.at(xb, yb);
         float* dst = acc.at(x, y);
         for (int c = 0; c < 3; ++c) {
+          if (!(mask >> c & 1)) continue;
           const float top = p00[c] + (p10[c] - p00[c]) * tx;
           const float bot = p01[c] + (p11[c] - p01[c]) * tx;
           dst[c] += weight * (top + (bot - top) * ty);
@@ -144,6 +146,17 @@ float reducedSigmaPx(float sigmaPx, int f) { return reducedSigma(sigmaPx, f); }
 
 int blurRadiusPx(float sigmaPx) { return sigmaPx < 0.25f ? 0 : int(std::ceil(3.f * sigmaPx)); }
 
+std::vector<LobeGroup> lobeGroups(const PxLobe& lobe) {
+  std::vector<LobeGroup> groups;
+  for (int c = 0; c < 3; ++c) {
+    const int f = downsampleFactor(lobe.sigmaPx[size_t(c)]);
+    auto it = std::find_if(groups.begin(), groups.end(), [&](const LobeGroup& g) { return g.factor == f; });
+    if (it == groups.end()) groups.push_back({f, 1 << c});
+    else it->mask |= 1 << c;
+  }
+  return groups;
+}
+
 int downsampleFactor(float sigmaPx) {
   if (sigmaPx <= 4.f) return 1;
   int f = 32;
@@ -154,10 +167,9 @@ int downsampleFactor(float sigmaPx) {
 int spreadReachPx(const std::vector<PxLobe>& lobes) {
   int reach = 0;
   for (const PxLobe& lobe : lobes) {
-    const float smin = std::min({lobe.sigmaPx[0], lobe.sigmaPx[1], lobe.sigmaPx[2]});
-    const int f = downsampleFactor(smin);
     for (size_t c = 0; c < 3; ++c) {
       // A coarse pixel depends on its f x f block; the bilinear up reads one coarse pixel either side.
+      const int f = downsampleFactor(lobe.sigmaPx[c]);
       const int r = f == 1 ? blurRadiusPx(lobe.sigmaPx[c]) : (blurRadiusPx(reducedSigma(lobe.sigmaPx[c], f)) + 2) * f;
       reach = std::max(reach, r);
     }
@@ -175,23 +187,28 @@ void spread(const Image4f& in, Image4f& out, const std::vector<PxLobe>& lobes) {
   });
   if (in.width <= 0 || in.height <= 0) return;
   for (const PxLobe& lobe : lobes) {
-    const float smin = std::min({lobe.sigmaPx[0], lobe.sigmaPx[1], lobe.sigmaPx[2]});
-    const int f = downsampleFactor(smin);
-    Image4f blurred;
-    if (f == 1) {
-      blurImpl(in, blurred, lobe.sigmaPx);
-      parallelRows(in.height, [&](int y0, int y1) {
-        for (int y = y0; y < y1; ++y)
-          for (int x = 0; x < in.width; ++x)
-            for (int c = 0; c < 3; ++c) out.at(x, y)[c] += lobe.weight * blurred.at(x, y)[c];
-      });
-    } else {
-      Image4f small;
-      boxDown(in, small, f);
-      std::array<float, 3> s;
-      for (size_t c = 0; c < 3; ++c) s[c] = reducedSigma(lobe.sigmaPx[c], f);
-      blurImpl(small, blurred, s);
-      upAccumulate(blurred, out, f, lobe.weight);
+    // Each channel runs at its own downsampleFactor; channels sharing one are blurred together.
+    for (const LobeGroup& g : lobeGroups(lobe)) {
+      Image4f blurred;
+      std::array<float, 3> s{0.f, 0.f, 0.f};  // channels outside the group: radius 0, not used
+      if (g.factor == 1) {
+        for (size_t c = 0; c < 3; ++c)
+          if (g.mask >> c & 1) s[c] = lobe.sigmaPx[c];
+        blurImpl(in, blurred, s);
+        parallelRows(in.height, [&](int y0, int y1) {
+          for (int y = y0; y < y1; ++y)
+            for (int x = 0; x < in.width; ++x)
+              for (int c = 0; c < 3; ++c)
+                if (g.mask >> c & 1) out.at(x, y)[c] += lobe.weight * blurred.at(x, y)[c];
+        });
+      } else {
+        Image4f small;
+        boxDown(in, small, g.factor);
+        for (size_t c = 0; c < 3; ++c)
+          if (g.mask >> c & 1) s[c] = reducedSigma(lobe.sigmaPx[c], g.factor);
+        blurImpl(small, blurred, s);
+        upAccumulate(blurred, out, g.factor, lobe.weight, g.mask);
+      }
     }
   }
 }
