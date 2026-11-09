@@ -467,6 +467,39 @@ TEST_CASE("sub-window equals full frame") {
   CHECK(allFiniteInRange(c, sub));
 }
 
+// The 32-px snap of the work rect (workRect) keeps the block grid of the widest lobes identical
+// in every window. At 154 px/mm (UHD Super 35) Bloom 0.5 mm runs at downsample factors 16 and 32,
+// halation at 8 and 16, so a window that starts off the 32 grid must still equal the full frame.
+// A frame smaller than UHD at the same px/mm keeps the same factors and the runtime short.
+TEST_CASE("sub-window equals full frame at large downsample factors") {
+  const double pxPerMm = 3840 / 24.89;
+  SpatialControls s = allOn(pxPerMm);
+  s.bloomRadiusMm = 0.5;
+  int fmax = 1;
+  for (const PxLobe& l : bloomPxLobes(sanitize(s))) fmax = std::max(fmax, downsampleFactor(l.sigmaPx[0]));
+  CHECK(fmax == 32);
+  const int margin = spatialMarginPx(film().optics, s);
+  const int w = 2 * margin + 301, h = 2 * margin + 157;
+  TestImage src(tight(0, 0, w, h), 0.f);
+  fillRandom(src, 13, false);
+  for (int y = h / 2 - 40; y < h / 2 + 10; ++y)  // a hard bright patch next to the window
+    for (int x = w / 2 - 90; x < w / 2 - 20; ++x)
+      for (int c = 0; c < 3; ++c) src.at(x, y)[c] = 0.95f;
+  const RenderWindow sub{margin + 45, margin + 39, w - margin - 5, h - margin - 3};  // off the 32 grid
+  const WorkRect r = workRect(src.cview(), sub, margin);
+  INFO("margin " << margin << " frame " << w << "x" << h << " work rect " << r.x1 << "," << r.y1 << " - " << r.x2 << "," << r.y2);
+  REQUIRE((r.x1 > 0 && r.y1 > 0 && r.x2 < w && r.y2 < h));  // cut on every side
+  TestImage a(tight(0, 0, w, h), 7.f), b(tight(0, 0, w, h), 7.f);
+  renderFilm(src.cview(), a.view(), {0, 0, w, h}, film(), LookControls{}, s);
+  renderFilm(src.cview(), b.view(), sub, film(), LookControls{}, s);
+  double worst = 0;
+  for (int y = sub.y1; y < sub.y2; ++y)
+    for (int x = sub.x1; x < sub.x2; ++x)
+      for (int c = 0; c < 4; ++c) worst = std::max(worst, double(std::abs(a.at(x, y)[c] - b.at(x, y)[c])));
+  MESSAGE("large-factor sub-window: max |diff| " << worst << " (margin " << margin << " px)");
+  CHECK(worst <= 1e-6);
+}
+
 TEST_CASE("extreme highlights stay finite") {
   const int w = 96, h = 54;
   TestImage src(tight(0, 0, w, h), 1.f);

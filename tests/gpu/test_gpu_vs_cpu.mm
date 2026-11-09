@@ -572,7 +572,14 @@ TEST_CASE("spatial: concurrent renders of different sizes") {
                         renderGpu(queue, f, win, baked, LookControls{}, &rendered, &controls[size_t(t)]);
                     const Result r = compare(f, gpu.data(), win);
                     ok[size_t(t)] += rendered;
-                    if (rep == 0 || r.maxDiff > results[size_t(t)].maxDiff || !r.alphaExact) results[size_t(t)] = r;
+                    // Combine the reps so no rep's failure is masked: worst diff, every check held.
+                    Result& acc = results[size_t(t)];
+                    if (rep == 0) acc = r;
+                    else {
+                        acc.maxDiff = std::max(acc.maxDiff, r.maxDiff);
+                        acc.alphaExact = acc.alphaExact && r.alphaExact;
+                        acc.outsideUntouched = acc.outsideUntouched && r.outsideUntouched;
+                    }
                 }
             }
         });
@@ -664,7 +671,7 @@ TEST_CASE("spatial: at most three work sets in flight") {
 // pixels land in unrelated table cells), every control at its default with Bloom on, tables already
 // uploaded. Median GPU time of 50 frames: target 20 ms, asserted <= 22 ms (see the check). A
 // profiling run first prints each pass's time.
-TEST_CASE("benchmark: UHD all M4 effects under 20 ms") {
+TEST_CASE("benchmark: UHD all M4 effects (target 20 ms, ceiling 22 ms)") {
     REQUIRE(renderer().isValid());
     const auto g = tight(0, 0, 3840, 2160);
     Frame f = makeFrame(g, g, randomFill(71, 0.f, 1.f, 1.f));
@@ -706,8 +713,9 @@ TEST_CASE("benchmark: UHD all M4 effects under 20 ms") {
     const double median = times[times.size() / 2] * 1e3;
     std::printf("UHD all M4 effects GPU median: %.3f ms (min %.3f, max %.3f); work set %.1f MB\n", median,
                 times.front() * 1e3, times.back() * 1e3, double(renderer().poolStats().lastSetBytes) / 1e6);
-    // The spec target is 20 ms. On the M4 Pro this measures 19.6-20.5 ms under a full ctest run
-    // (~19.7 typical); the 22 ms ceiling absorbs GPU contention from the rest of the desktop.
+    // The spec target is 20 ms. On the M4 Pro, three full ctest runs (print scatter-only, R14)
+    // measured medians of 19.05, 19.86 and 19.13 ms: about 19.0-19.9 ms depending on load. The 22 ms
+    // ceiling absorbs GPU contention from the rest of the desktop.
     CHECK(median <= 22.0);
 }
 
