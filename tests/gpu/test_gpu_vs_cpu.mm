@@ -13,6 +13,7 @@
 #include "metal/metal_renderer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -419,6 +420,26 @@ TEST_CASE("spatial: points, edges, noise") {
     }
 }
 
+// The GPU picks how each full-resolution lobe runs (its horizontal pass inside the fused pass, a
+// separate horizontal pass, or summed by separate passes before the fused one). The default picks
+// leave some of these unused at a given scale; forcing each way at both scales covers them all.
+TEST_CASE("spatial: every blur path") {
+    const int w = 384, h = 216;
+    const auto g = tight(0, 0, w, h);
+    for (int limit : {-1, 1000}) {  // nothing computed in the fused pass / everything
+        CAPTURE(limit);
+        renderer().setDirectBlurLimit(limit);
+        for (double pxPerMm : {w / 24.89, 3840 / 24.89}) {
+            CAPTURE(pxPerMm);
+            checkSpatial(g, g, {0, 0, w, h}, LookControls{}, spatialAllOn(pxPerMm), pointsEdgesNoise(31, w, h));
+        }
+        const auto sg = tight(40, 30, 200, 130), dg = tight(0, 0, 240, 160);  // window leaves the source
+        checkSpatial(sg, dg, {20, 10, 230, 150}, LookControls{}, spatialAllOn(3840 / 24.89),
+                     pointsEdgesNoise(41, 240, 160));
+    }
+    renderer().setDirectBlurLimit(24);
+}
+
 TEST_CASE("spatial: odd sizes, padded rows, sub-windows") {
     const SpatialControls on = spatialAllOn(3840 / 24.89);
     const SpatialControls small = spatialAllOn(1000 / 24.89);
@@ -567,35 +588,67 @@ TEST_CASE("spatial: concurrent renders of different sizes") {
     }
 }
 
-// Reports the GPU time of a UHD all-on render (Task 6 owns the budget; no bar here).
-TEST_CASE("benchmark: UHD spatial all on") {
+TEST_CASE("spatial: the work pool keeps at most one idle set per device") {
+    // Runs after the concurrent test above, which had up to 8 sets out at once. Every completion
+    // handler must have returned its set before we look.
+    for (int i = 0; i < 200 && renderer().poolStats().inFlight > 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const auto st = renderer().poolStats();
+    CHECK(st.inFlight == 0);
+    CHECK(st.idleMaxPerDevice <= 1);
+    // A set left idle (volatile) is taken again and still renders correctly.
+    const auto g = tight(0, 0, 160, 90);
+    checkSpatial(g, g, {0, 0, 160, 90}, LookControls{}, spatialAllOn(160 / 24.89), pointsEdgesNoise(73, 160, 90));
+    checkSpatial(g, g, {0, 0, 160, 90}, LookControls{}, spatialAllOn(160 / 24.89), pointsEdgesNoise(74, 160, 90));
+    CHECK(renderer().poolStats().idleMaxPerDevice <= 1);
+}
+
+// The M4 speed budget: a UHD Super 35 frame of uniform noise (the M3 worst case: neighbouring
+// pixels land in unrelated table cells), every control at its default with Bloom on, tables already
+// uploaded. Median GPU time of 50 frames <= 20 ms. A profiling run first prints each pass's time.
+TEST_CASE("benchmark: UHD all M4 effects under 20 ms") {
     REQUIRE(renderer().isValid());
     const auto g = tight(0, 0, 3840, 2160);
-    Frame f = makeFrame(g, g, [](int x, int y, float* p) {
-        const float u = float(x) / 3839.f, v = float(y) / 2159.f;
-        p[0] = u;
-        p[1] = v;
-        p[2] = 0.5f + 0.5f * std::sin(6.2831853f * (u + v));
-        p[3] = 1.f;
-    });
+    Frame f = makeFrame(g, g, randomFill(71, 0.f, 1.f, 1.f));
     id<MTLDevice> dev = device();
     OFRecordingQueue* queue = [OFRecordingQueue new];
     queue.real = [dev newCommandQueue];
     id<MTLBuffer> srcBuf = [dev newBufferWithBytes:f.src.data() length:f.src.size() * 4 options:MTLResourceStorageModeShared];
     id<MTLBuffer> dstBuf = [dev newBufferWithLength:f.cpu.size() * 4 options:MTLResourceStorageModeShared];
-    const SpatialControls s = spatialAllOn(3840 / 24.89);
+    SpatialControls s;  // every control at its default...
+    s.bloom = true;     // ...with Bloom enabled
+    s.pxPerMm = 3840 / 24.89;
+    const RenderWindow win{0, 0, 3840, 2160};
+    const auto render = [&] {
+        return renderer().render((__bridge void*)queue, (__bridge void*)srcBuf, g, (__bridge void*)dstBuf, g, win,
+                                 film(), LookControls{}, s);
+    };
+
+    // Profiling run: one command buffer per pass.
+    renderer().setPassProfiling(true);
+    REQUIRE(render());
+    REQUIRE(render());  // the second, warm, is the one printed
+    renderer().setPassProfiling(false);
+    double sum = 0;
+    for (const auto& p : renderer().lastPassTimes()) {
+        std::printf("  %7.3f ms  %s\n", p.ms, p.name.c_str());
+        sum += p.ms;
+    }
+    std::printf("  %7.3f ms  sum of passes\n", sum);
+
     std::vector<double> times;
-    for (int i = 0; i < 6; ++i) {  // frame 0 warms up
-        REQUIRE(renderer().render((__bridge void*)queue, (__bridge void*)srcBuf, g, (__bridge void*)dstBuf, g,
-                                  {0, 0, 3840, 2160}, film(), LookControls{}, s));
+    for (int i = 0; i < 51; ++i) {  // frame 0 warms up
+        REQUIRE(render());
         id<MTLCommandBuffer> cmd = queue.last;
         [cmd waitUntilCompleted];
         CHECK(cmd.status == MTLCommandBufferStatusCompleted);
         if (i > 0) times.push_back(cmd.GPUEndTime - cmd.GPUStartTime);
     }
     std::sort(times.begin(), times.end());
-    std::printf("UHD spatial all-on GPU median: %.3f ms (min %.3f, max %.3f)\n", times[times.size() / 2] * 1e3,
-                times.front() * 1e3, times.back() * 1e3);
+    const double median = times[times.size() / 2] * 1e3;
+    std::printf("UHD all M4 effects GPU median: %.3f ms (min %.3f, max %.3f); work set %.1f MB\n", median,
+                times.front() * 1e3, times.back() * 1e3, double(renderer().poolStats().lastSetBytes) / 1e6);
+    CHECK(median <= 20.0);
 }
 
 TEST_CASE("benchmark: UHD under 5 ms") {

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace openfilm {
 
@@ -47,6 +48,30 @@ public:
 
     // Number of film table sets currently held on the GPU (for tests).
     size_t cachedFilmCount() const;
+
+    // ---- Diagnostics (tests and benchmarks) ----
+    // The intermediate-buffer pool: the most idle work sets any one device holds, how many sets are
+    // out with renders whose command buffers have not completed yet, and the bytes of the set the
+    // last spatial render used.
+    struct PoolStats {
+        size_t idleMaxPerDevice = 0;
+        size_t inFlight = 0;
+        size_t lastSetBytes = 0;
+    };
+    PoolStats poolStats() const;
+
+    // When on, the spatial overload commits every pass as its own command buffer, waits for each, and
+    // records its GPU time (so render() blocks). Off by default; for profiling only.
+    struct PassTime {
+        std::string name;
+        double ms;
+    };
+    void setPassProfiling(bool on);
+    // Largest cost (image reads per output pixel) of a full-resolution lobe whose horizontal pass the
+    // fused pass computes itself; costlier ones get their own horizontal pass, and a stage with more
+    // than one of those sums the rest in separate passes first. Tests lower it to cover those paths.
+    void setDirectBlurLimit(int reads);
+    std::vector<PassTime> lastPassTimes() const;
 
 private:
     struct Impl;

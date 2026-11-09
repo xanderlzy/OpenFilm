@@ -10,6 +10,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <functional>
+#include <string>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -48,6 +51,7 @@ id<MTLBuffer> upload(id<MTLDevice> device, const std::vector<float>& v) {
 struct GpuFilm {
     std::weak_ptr<const BakedFilm> owner;  // expires when the bake is dropped
     id<MTLBuffer> lutE, lutPE, lutD, curves;
+    id<MTLBuffer> lutEHalf;  // lutE as half (its values are exact in half), for the spatial path
     OFLut3D descE, descPE, descD;
     OFCurve neg[3], print[3];
 };
@@ -56,6 +60,11 @@ std::shared_ptr<GpuFilm> uploadFilm(id<MTLDevice> device, const std::shared_ptr<
     auto g = std::make_shared<GpuFilm>();
     g->owner = film;
     g->lutE = upload(device, film->lutE.data());
+    {
+        std::vector<_Float16> h(film->lutE.data().begin(), film->lutE.data().end());
+        g->lutEHalf = [device newBufferWithBytes:h.data() length:h.size() * sizeof(_Float16)
+                                         options:MTLResourceStorageModeShared];
+    }
     g->lutPE = upload(device, film->lutPE.data());
     g->lutD = upload(device, film->lutD.data());
     g->descE = describe(film->lutE);
@@ -77,8 +86,8 @@ std::shared_ptr<GpuFilm> uploadFilm(id<MTLDevice> device, const std::shared_ptr<
 // Every kernel of OpenFilm.metallib, compiled for one device.
 struct Pipelines {
     id<MTLComputePipelineState> film;  // M3 colour kernel
-    id<MTLComputePipelineState> expose, blurH, blurV, boxDown, up, clear, bloomMix, halationAdd, develop, edge,
-        printExpose, finish;
+    id<MTLComputePipelineState> expose, boxDown, boxDown2, up, blurHTiled, blurHBlock, blurV, finish;
+    id<MTLLibrary> library;  // for the specialised sp_fused pipelines
 };
 
 // One thread per pixel in tiles shaped from what the pipeline allows: a SIMD-group wide, as many
@@ -95,152 +104,286 @@ void dispatch(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pso,
 }
 
 // The intermediate images of one spatial render: three full-size work images (two the stages
-// ping-pong between, one for the horizontal blur pass) and two at half size or less for the
-// reduced-resolution lobes (box down -> horizontal -> vertical back into the first -> up).
+// ping-pong between, one for a separate horizontal blur pass), and at reduced resolution three
+// scratch images (box down, box down by twice the factor, horizontal blur) plus one that holds every
+// reduced lobe's result for the fused pass that reads them.
 struct WorkSet {
     uintptr_t device = 0;
-    size_t fullPx = 0, smallPx = 0;  // capacity in float4 pixels
+    size_t fullPx = 0, smallPx = 0, resPx = 0;  // capacity in float4 pixels
     id<MTLBuffer> full[3];
-    id<MTLBuffer> small[2];
+    id<MTLBuffer> small[4];  // scratch x 3, results
+
+    size_t bytes() const { return (3 * fullPx + 3 * smallPx + resPx) * 4 * sizeof(float); }
 };
 
 // Per-device pool of WorkSets, shared by every render thread. A render takes a set big enough for
 // its work rect (the smallest that fits, else a new one) and gives it back from its command
 // buffer's completion handler, so a set is never reused while the GPU still works in it. At most
-// kMaxIdle sets per device are kept between renders; the smallest go first.
+// kMaxIdle sets per device are kept between renders (the largest stays), and idle sets are marked
+// volatile so the OS may reclaim their memory under pressure; take() makes a set non-volatile again
+// and drops it for a fresh one if the OS did.
 class WorkPool {
 public:
-    std::shared_ptr<WorkSet> take(id<MTLDevice> device, size_t fullPx, size_t smallPx) {
+    std::shared_ptr<WorkSet> take(id<MTLDevice> device, size_t fullPx, size_t smallPx, size_t resPx) {
         const auto key = reinterpret_cast<uintptr_t>((__bridge void*)device);
+        std::shared_ptr<WorkSet> reused;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            ++inFlight_;
             auto& idle = idle_[key];
             auto best = idle.end();
             for (auto it = idle.begin(); it != idle.end(); ++it)
-                if ((*it)->fullPx >= fullPx && (*it)->smallPx >= smallPx &&
+                if ((*it)->fullPx >= fullPx && (*it)->smallPx >= smallPx && (*it)->resPx >= resPx &&
                     (best == idle.end() || (*it)->fullPx < (*best)->fullPx))
                     best = it;
             if (best != idle.end()) {
-                auto set = *best;
+                reused = *best;
                 idle.erase(best);
-                return set;
             }
         }
+        if (reused && makeNonVolatile(*reused)) return reused;
+        reused.reset();  // purged while idle (or never there): allocate afresh
         // Allocate outside the lock: large buffers take a while.
         auto set = std::make_shared<WorkSet>();
         set->device = key;
         set->fullPx = fullPx;
         set->smallPx = smallPx;
+        set->resPx = resPx;
         const auto bytes = [](size_t px) { return std::max<size_t>(px, 1) * 4 * sizeof(float); };
         for (auto& b : set->full) {
             b = [device newBufferWithLength:bytes(fullPx) options:MTLResourceStorageModePrivate];
-            if (!b) return nullptr;
+            if (!b) return failed();
             b.label = @"OpenFilm work";
         }
-        for (auto& b : set->small) {
-            b = [device newBufferWithLength:bytes(smallPx) options:MTLResourceStorageModePrivate];
-            if (!b) return nullptr;
+        for (int k = 0; k < 4; ++k) {
+            id<MTLBuffer> b = [device newBufferWithLength:bytes(k < 3 ? smallPx : resPx)
+                                                  options:MTLResourceStorageModePrivate];
+            if (!b) return failed();
             b.label = @"OpenFilm work (reduced)";
+            set->small[k] = b;
         }
         return set;
     }
 
     void give(std::shared_ptr<WorkSet> set) {
+        for (auto& b : set->full) [b setPurgeableState:MTLPurgeableStateVolatile];
+        for (auto& b : set->small) [b setPurgeableState:MTLPurgeableStateVolatile];
         std::lock_guard<std::mutex> lock(mutex_);
+        --inFlight_;
         auto& idle = idle_[set->device];
         idle.push_back(std::move(set));
-        if (idle.size() > kMaxIdle) {
+        while (idle.size() > kMaxIdle) {
             auto smallest = std::min_element(idle.begin(), idle.end(),
                                              [](const auto& a, const auto& b) { return a->fullPx < b->fullPx; });
             idle.erase(smallest);
         }
     }
 
-    size_t idleCount() const {
+    size_t idleMaxPerDevice() const {
         std::lock_guard<std::mutex> lock(mutex_);
         size_t n = 0;
-        for (const auto& kv : idle_) n += kv.second.size();
+        for (const auto& kv : idle_) n = std::max(n, kv.second.size());
         return n;
     }
 
+    size_t inFlight() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return inFlight_;
+    }
+
 private:
-    static constexpr size_t kMaxIdle = 2;
+    static constexpr size_t kMaxIdle = 1;
     mutable std::mutex mutex_;
     std::unordered_map<uintptr_t, std::vector<std::shared_ptr<WorkSet>>> idle_;
+    size_t inFlight_ = 0;
+
+    // Every buffer back to non-volatile; false if the OS discarded any of them while idle.
+    static bool makeNonVolatile(WorkSet& set) {
+        bool intact = true;
+        for (auto& b : set.full)
+            intact = [b setPurgeableState:MTLPurgeableStateNonVolatile] != MTLPurgeableStateEmpty && intact;
+        for (auto& b : set.small)
+            intact = [b setPurgeableState:MTLPurgeableStateNonVolatile] != MTLPurgeableStateEmpty && intact;
+        return intact;
+    }
+
+    std::shared_ptr<WorkSet> failed() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --inFlight_;
+        return nullptr;
+    }
 };
 
 // The spatial chain as a list of GPU passes, built on the host from the CPU's own lobes, sigmas and
 // taps (film_spatial.cpp, blur.cpp), then encoded in order. Buffers are named by slot.
-enum Slot { kFull0, kFull1, kFull2, kSmall0, kSmall1 };
+enum Slot { kFull0, kFull1, kFull2, kSmall0, kSmall1, kSmall2, kSmallRes, kDst };
 
 struct Pass {
-    enum Kind { BlurH, BlurV, BoxDown, Up, Clear, BloomMix, HalationAdd, Develop, Edge, PrintExpose } kind;
-    int in = -1, out = -1;  // slots (in-place passes use `out` only)
+    enum Kind { BoxDown, BoxDown2, BlurHTiled, BlurHBlock, BlurV, Up, Fused } kind;
+    int in = -1, out = -1, out2 = -1;  // slots (out2: BoxDown2's 2f result)
+    size_t inOffset = 0, outOffset = 0;  // float4 pixels into `in` / `out` (reduced results)
     OFPassUniforms u{};
+    size_t tileBytes = 0;              // BlurHTiled: threadgroup memory
+    const char* stage = "";            // for profiling
+    // Fused: uniforms, shape (function constants) and its pipeline.
+    OFFuseUniforms fu{};
+    int combine = 0, post = 0, channels = 3, nLobes = 0, kinds = 0;
+    int sum = -1;                      // slot holding the sum of the lobes before the fused ones, if any
+    id<MTLComputePipelineState> pso = nil;
 };
+
+// One spatial stage of renderFilm(): a spread of the working image, the combine that uses it, and
+// which pointwise stages run straight after it.
+struct Stage {
+    const char* name;
+    std::vector<PxLobe> lobes;
+    std::vector<std::array<float, 3>> weights;  // per lobe, per channel
+    int combine;
+    std::array<float, 3> cw;
+    int channels;  // 1 when only red of the sum is used
+    int post = 0;
+};
+
+// Default for MetalRenderer::setDirectBlurLimit: at UHD Super 35 the negative's finest scatter lobe
+// (about 19 reads) is computed in the fused pass, its wider one (54) and the edge blurs are not.
+constexpr int kDefaultDirectLimit = 24;
 
 class SpatialPlan {
 public:
-    SpatialPlan(int w, int h) : w_(w), h_(h) {}
+    SpatialPlan(int w, int h, int ww, int wh, size_t tgLimitBytes, int directLimit)
+        : w_(w), h_(h), ww_(ww), wh_(wh), tgLimit_(tgLimitBytes), directLimit_(directLimit) {}
 
     std::vector<float> taps;
     std::vector<Pass> passes;
-    bool usesReduced = false;
-    size_t smallPx = 0;
+    size_t smallPx = 0, resPx = 0;
 
-    // out.rgb = sum_i weights[i] * G_{lobes[i]}(in)  (spread(), with per-channel weights).
-    void spread(int in, int out, const std::vector<PxLobe>& lobes, const std::vector<std::array<float, 3>>& weights) {
-        if (lobes.empty()) {
-            add(Pass::Clear, -1, out, base());
-            return;
+    // Encodes `st` reading slot `img`; the result goes to `other` (or dst when it finishes).
+    void stage(const Stage& st, int img, int other) {
+        stage_ = st.name;
+        const size_t n = st.lobes.size();
+        // How each lobe runs: REDUCED when downsampled; at full resolution DIRECT while its
+        // horizontal pass is cheap to redo per column block (directCost), else PRE_H.
+        std::vector<int> kind(n), factor(n);
+        for (size_t i = 0; i < n; ++i) {
+            const PxLobe& lobe = st.lobes[i];
+            factor[i] = downsampleFactor(std::min({lobe.sigmaPx[0], lobe.sigmaPx[1], lobe.sigmaPx[2]}));
+            kind[i] = factor[i] > 1 ? OF_LOBE_REDUCED
+                      : directCost(lobe, st.channels) <= directLimit_ ? OF_LOBE_DIRECT
+                                                                      : OF_LOBE_PRE_H;
         }
-        for (size_t i = 0; i < lobes.size(); ++i) {
-            const PxLobe& lobe = lobes[i];
+        // The fused pass takes the longest tail of lobes it can (OF_MAX_LOBES, one PRE_H: there is
+        // one T buffer); the lobes before it are summed into `other` by separate passes, as spread()
+        // does, and the fused pass continues that sum and overwrites it with its result.
+        size_t first = n;
+        int preH = 0;
+        while (first > 0 && n - first < OF_MAX_LOBES) {
+            if (kind[first - 1] == OF_LOBE_PRE_H && preH++ == 1) break;
+            --first;
+        }
+
+        // Every reduced lobe first, each blurred into its own place in kSmallRes. One pair of
+        // factors f and 2f is boxed down in one read (bloom's and halation's two lobes are).
+        std::vector<size_t> resAt(n, 0);
+        size_t resUsed = 0;
+        size_t pa = n, pb = n;
+        for (size_t i = 0; i < n && pa == n; ++i)
+            for (size_t j = i + 1; j < n && pa == n; ++j)
+                if (factor[i] > 1 && (factor[j] == 2 * factor[i] || 2 * factor[j] == factor[i])) {
+                    pa = factor[i] < factor[j] ? i : j;
+                    pb = pa == i ? j : i;
+                }
+        if (pa < n) box2(img, factor[pa]);
+        for (int pass = 0; pass < 2; ++pass)  // the paired factors' lobes, then the rest
+            for (size_t i = 0; i < n; ++i) {
+                if (factor[i] == 1) continue;
+                const bool paired = pa < n && (factor[i] == factor[pa] || factor[i] == factor[pb]);
+                if (paired != (pass == 0)) continue;
+                resAt[i] = resUsed;
+                reduce(img, paired ? (factor[i] == factor[pa] ? kSmall0 : kSmall2) : -1, st.lobes[i], factor[i],
+                       resUsed, i < first ? 3 : st.channels);
+                resUsed += size_t((w_ + factor[i] - 1) / factor[i]) * size_t((h_ + factor[i] - 1) / factor[i]);
+            }
+        resPx = std::max(resPx, resUsed);
+
+        // Prefix: spread() pass by pass, summed into `other`.
+        for (size_t i = 0; i < first; ++i) {
+            const PxLobe& lobe = st.lobes[i];
             const int mode = i == 0 ? OF_STORE_WEIGHTED : OF_ACCUMULATE;
-            const float smin = std::min({lobe.sigmaPx[0], lobe.sigmaPx[1], lobe.sigmaPx[2]});
-            const int f = downsampleFactor(smin);
-            if (f == 1) {
-                OFPassUniforms b = blurUniforms(w_, h_, lobe.sigmaPx);
-                add(Pass::BlurH, in, kFull2, b);
+            if (factor[i] == 1) {
+                OFPassUniforms b = blurUniforms(w_, h_, lobe.sigmaPx, 3);
+                addBlurH(img, kFull2, b);
                 b.mode = mode;
-                setWeight(b, weights[i]);
-                add(Pass::BlurV, kFull2, out, b);
+                setWeight(b, st.weights[i]);
+                add(Pass::BlurV, kFull2, other, b);
             } else {
-                const int sw = (w_ + f - 1) / f, sh = (h_ + f - 1) / f;
-                usesReduced = true;
-                smallPx = std::max(smallPx, size_t(sw) * size_t(sh));
-                OFPassUniforms box = base();
-                box.width = sw;
-                box.height = sh;
-                box.factor = f;
-                add(Pass::BoxDown, in, kSmall0, box);
-                std::array<float, 3> s;
-                for (size_t c = 0; c < 3; ++c) s[c] = reducedSigmaPx(lobe.sigmaPx[c], f);
-                OFPassUniforms b = blurUniforms(sw, sh, s);
-                add(Pass::BlurH, kSmall0, kSmall1, b);
-                b.mode = OF_STORE;
-                add(Pass::BlurV, kSmall1, kSmall0, b);
                 OFPassUniforms up = base();
-                up.inWidth = sw;
-                up.inHeight = sh;
-                up.factor = f;
+                up.inWidth = (w_ + factor[i] - 1) / factor[i];
+                up.inHeight = (h_ + factor[i] - 1) / factor[i];
+                up.factor = factor[i];
                 up.mode = mode;
-                setWeight(up, weights[i]);
-                add(Pass::Up, kSmall0, out, up);
+                setWeight(up, st.weights[i]);
+                add(Pass::Up, kSmallRes, other, up);
+                passes.back().inOffset = resAt[i];
             }
         }
+
+        // The fused pass (and the horizontal pass of its PRE_H lobe).
+        Pass f;
+        f.kind = Pass::Fused;
+        f.in = img;
+        f.out = st.post & OF_POST_FINISH ? kDst : other;
+        f.sum = first > 0 ? other : -1;
+        f.combine = st.combine;
+        f.post = st.post;
+        f.channels = st.channels;
+        OFFuseUniforms& fu = f.fu;
+        fu.width = w_;
+        fu.height = h_;
+        for (int c = 0; c < 3; ++c) fu.cw[c] = st.cw[size_t(c)];
+        for (size_t i = first; i < n; ++i) {
+            const PxLobe& lobe = st.lobes[i];
+            f.kinds |= kind[i] << (2 * f.nLobes);
+            OFLobe& L = fu.lobes[f.nLobes++];
+            for (int c = 0; c < 3; ++c) L.weight[c] = st.weights[i][size_t(c)];
+            if (kind[i] == OF_LOBE_REDUCED) {
+                const int fct = factor[i];
+                L.factor = fct;
+                L.sw = (w_ + fct - 1) / fct;
+                L.sh = (h_ + fct - 1) / fct;
+                L.smallOffset = int(resAt[i]);
+                continue;
+            }
+            const OFPassUniforms b = blurUniforms(w_, h_, lobe.sigmaPx, st.channels);
+            for (int c = 0; c < 3; ++c) {
+                L.radius[c] = b.radius[c];
+                L.tapOffset[c] = b.tapOffset[c];
+            }
+            if (kind[i] == OF_LOBE_PRE_H) addBlurH(img, kFull2, b);
+        }
+        f.stage = stage_;
+        passes.push_back(f);
     }
 
-    // Per-pixel pass over the full work image, with per-channel weights.
-    void pointwise(Pass::Kind kind, int img, int other, std::array<float, 3> weight = {0, 0, 0}, int mode = 0) {
-        OFPassUniforms u = base();
-        u.mode = mode;
-        setWeight(u, weight);
-        add(kind, other, img, u);
-    }
+    // The fused pass's grid: the window when it finishes, else the work rect.
+    int gridW(const Pass& p) const { return p.post & OF_POST_FINISH ? ww_ : w_; }
+    int gridH(const Pass& p) const { return p.post & OF_POST_FINISH ? wh_ : h_; }
 
 private:
-    int w_, h_;
+    int w_, h_, ww_, wh_;
+    size_t tgLimit_;
+    int directLimit_;
+    const char* stage_ = "";
+
+    // Image reads per output pixel of a DIRECT lobe: each column block of OF_BLOCK pixels computes
+    // OF_BLOCK + 2r horizontal sums of 2r + 1 taps per channel.
+    static int directCost(const PxLobe& lobe, int channels) {
+        int n = 0;
+        for (int c = 0; c < channels; ++c) {
+            const int r = blurRadiusPx(lobe.sigmaPx[size_t(c)]);
+            n += (OF_BLOCK + 2 * r) * (2 * r + 1);
+        }
+        return (n + OF_BLOCK - 1) / OF_BLOCK;
+    }
 
     OFPassUniforms base() const {
         OFPassUniforms u{};
@@ -250,14 +393,15 @@ private:
         return u;
     }
 
-    OFPassUniforms blurUniforms(int w, int h, const std::array<float, 3>& sigma) {
+    // Taps of the first `channels` channels (the others get radius 0 and are not used).
+    OFPassUniforms blurUniforms(int w, int h, const std::array<float, 3>& sigma, int channels) {
         OFPassUniforms u{};
         u.width = u.inWidth = w;
         u.height = u.inHeight = h;
         u.factor = 1;
         u.mode = OF_STORE;
         for (int c = 0; c < 3; ++c) {
-            u.radius[c] = blurRadiusPx(sigma[size_t(c)]);
+            u.radius[c] = c < channels ? blurRadiusPx(sigma[size_t(c)]) : 0;
             u.tapOffset[c] = int(taps.size());
             if (u.radius[c] > 0) {
                 const std::vector<float> t = blurTaps(sigma[size_t(c)]);
@@ -266,6 +410,54 @@ private:
         }
         return u;
     }
+
+    // Box down of `img` by f into kSmall0 and by 2f into kSmall2, one read.
+    void box2(int img, int f) {
+        const int sw = (w_ + 2 * f - 1) / (2 * f), sh = (h_ + 2 * f - 1) / (2 * f);
+        smallPx = std::max(smallPx, size_t((w_ + f - 1) / f) * size_t((h_ + f - 1) / f));
+        OFPassUniforms box = base();
+        box.width = sw;
+        box.height = sh;
+        box.factor = f;
+        add(Pass::BoxDown2, img, kSmall0, box);
+        passes.back().out2 = kSmall2;
+    }
+
+    // Box down `img` by f (unless already boxed into `boxed`), then blur with the lobe's reduced
+    // sigmas into kSmallRes at `offset`.
+    void reduce(int img, int boxed, const PxLobe& lobe, int f, size_t offset, int channels) {
+        const int sw = (w_ + f - 1) / f, sh = (h_ + f - 1) / f;
+        smallPx = std::max(smallPx, size_t(sw) * size_t(sh));
+        if (boxed < 0) {
+            OFPassUniforms box = base();
+            box.width = sw;
+            box.height = sh;
+            box.factor = f;
+            add(Pass::BoxDown, img, kSmall0, box);
+            boxed = kSmall0;
+        }
+        std::array<float, 3> s;
+        for (size_t c = 0; c < 3; ++c) s[c] = reducedSigmaPx(lobe.sigmaPx[c], f);
+        OFPassUniforms b = blurUniforms(sw, sh, s, channels);
+        addBlurH(boxed, kSmall1, b);
+        b.mode = OF_STORE;
+        add(Pass::BlurV, kSmall1, kSmallRes, b);
+        passes.back().outOffset = offset;
+    }
+
+    // Horizontal blur: from threadgroup memory for small radii, else register-blocked.
+    void addBlurH(int in, int out, const OFPassUniforms& u) {
+        size_t n = 0;
+        int rmax = 0;
+        for (int c = 0; c < 3; ++c) {
+            n += size_t(OF_HTILE + 2 * u.radius[c]);
+            rmax = std::max(rmax, u.radius[c]);
+        }
+        const bool tiled = rmax < kTiledHMaxRadius && n * sizeof(float) <= tgLimit_;
+        add(tiled ? Pass::BlurHTiled : Pass::BlurHBlock, in, out, u);
+        if (tiled) passes.back().tileBytes = n * sizeof(float);
+    }
+    static constexpr int kTiledHMaxRadius = 16;  // measured crossover at UHD
 
     static void setWeight(OFPassUniforms& u, const std::array<float, 3>& w) {
         for (int c = 0; c < 3; ++c) u.weight[c] = w[size_t(c)];
@@ -277,9 +469,28 @@ private:
         p.in = in;
         p.out = out;
         p.u = u;
+        p.stage = stage_;
         passes.push_back(p);
     }
 };
+
+// "blurV 3840x2160 r=4,4,9", "fused 3840x2160 lobes: direct preH reduced" and the like, for profiles.
+std::string passName(const Pass& p, int gw, int gh) {
+    static const char* kNames[] = {"boxDown", "boxDown2", "blurH(tg)", "blurH(block)", "blurV", "up", "fused"};
+    std::string n = std::string(kNames[p.kind]) + " " + std::to_string(gw) + "x" + std::to_string(gh);
+    if (p.kind == Pass::BlurHTiled || p.kind == Pass::BlurHBlock || p.kind == Pass::BlurV)
+        n += " r=" + std::to_string(p.u.radius[0]) + "," + std::to_string(p.u.radius[1]) + "," +
+             std::to_string(p.u.radius[2]);
+    if (p.kind == Pass::BoxDown || p.kind == Pass::Up) n += " f=" + std::to_string(p.u.factor);
+    if (p.kind == Pass::BoxDown2) n += " f=" + std::to_string(p.u.factor) + "," + std::to_string(2 * p.u.factor);
+    if (p.kind == Pass::Fused) {
+        static const char* kKinds[] = {"direct", "preH", "reduced"};
+        n += " lobes:";
+        for (int l = 0; l < p.nLobes; ++l) n += std::string(" ") + kKinds[(p.kinds >> (2 * l)) & 3];
+        if (p.sum >= 0) n += " +sum";
+    }
+    return n;
+}
 
 std::vector<std::array<float, 3>> lobeWeights(const std::vector<PxLobe>& lobes) {
     std::vector<std::array<float, 3>> w;
@@ -291,44 +502,46 @@ std::array<float, 3> edgeGains(const std::array<LayerSharpness, 3>& layers) {
     return {float(layers[0].edgeK), float(layers[1].edgeK), float(layers[2].edgeK)};
 }
 
-// The stages of renderFilm() after exposeStage, in its order; the working image starts in kFull0.
-// Returns the slot holding the final print density.
-int planStages(SpatialPlan& plan, const FilmOptics& optics, const SpatialControls& s) {
-    int img = kFull0, other = kFull1;
-    // exposureEffects: bloom, scatter, halation.
+// The stages of renderFilm() after exposeStage, in its order, each spread fused with its combine and
+// the pointwise stages that follow it; the last one writes the window of dst. The working image
+// starts in kFull0.
+void planStages(SpatialPlan& plan, const FilmOptics& optics, const SpatialControls& s) {
+    std::vector<Stage> stages;
+    const auto post = [&](int bit) { stages.back().post |= bit; };  // there is always a stage before
     if (s.bloom) {
         const auto lobes = bloomPxLobes(s);
-        plan.spread(img, other, lobes, lobeWeights(lobes));
         const float a = float(s.bloomAmount);
-        plan.pointwise(Pass::BloomMix, img, other, {a, a, a});
+        stages.push_back({"bloom", lobes, lobeWeights(lobes), OF_COMBINE_BLOOM, {a, 0, 0}, 3});
     }
     if (s.sharpness) {
         const LayerPasses lp = layerPasses(optics.negative, s.pxPerMm);
-        plan.spread(img, other, lp.passes, lp.weights);
-        std::swap(img, other);
+        stages.push_back({"neg scatter", lp.passes, lp.weights, OF_COMBINE_STORE, {0, 0, 0}, 3});
     }
     if (s.halation) {
+        // Only the red of the halo is used (the red layer's light reaches the base), so only red is
+        // blurred: the same red as the CPU's three-channel spread, at the same downsample factor.
         const auto lobes = haloLobes(optics, s);
-        plan.spread(img, other, lobes, lobeWeights(lobes));
-        plan.pointwise(Pass::HalationAdd, img, other, halationWeights(optics, s));
+        stages.push_back({"halation", lobes, lobeWeights(lobes), OF_COMBINE_HALATION, halationWeights(optics, s), 1});
     }
-    plan.pointwise(Pass::Develop, img, -1, {0, 0, 0}, 0);
-    if (s.sharpness) {
-        plan.spread(img, other, edgeLobe(optics.negative, s.pxPerMm), {{1.f, 1.f, 1.f}});
-        plan.pointwise(Pass::Edge, img, other, edgeGains(optics.negative));
-    }
-    plan.pointwise(Pass::PrintExpose, img, -1);
+    post(OF_POST_DEVELOP_NEG);
+    if (s.sharpness)
+        stages.push_back({"neg edge", edgeLobe(optics.negative, s.pxPerMm), {{1.f, 1.f, 1.f}}, OF_COMBINE_EDGE,
+                          edgeGains(optics.negative), 3});
+    post(OF_POST_PRINT_EXPOSE);
     if (s.sharpness) {
         const LayerPasses lp = layerPasses(optics.print, s.pxPerMm);
-        plan.spread(img, other, lp.passes, lp.weights);
+        stages.push_back({"print scatter", lp.passes, lp.weights, OF_COMBINE_STORE, {0, 0, 0}, 3});
+    }
+    post(OF_POST_DEVELOP_PRINT);
+    if (s.sharpness)
+        stages.push_back({"print edge", edgeLobe(optics.print, s.pxPerMm), {{1.f, 1.f, 1.f}}, OF_COMBINE_EDGE,
+                          edgeGains(optics.print), 3});
+    post(OF_POST_FINISH);
+    int img = kFull0, other = kFull1;
+    for (const Stage& st : stages) {
+        plan.stage(st, img, other);
         std::swap(img, other);
     }
-    plan.pointwise(Pass::Develop, img, -1, {0, 0, 0}, 1);
-    if (s.sharpness) {
-        plan.spread(img, other, edgeLobe(optics.print, s.pxPerMm), {{1.f, 1.f, 1.f}});
-        plan.pointwise(Pass::Edge, img, other, edgeGains(optics.print));
-    }
-    return img;
 }
 
 }  // namespace
@@ -348,6 +561,35 @@ struct MetalRenderer::Impl {
     std::map<std::pair<uintptr_t, const BakedFilm*>, std::shared_ptr<GpuFilm>> films;
     // Shared with in-flight command buffers' completion handlers, which may outlive the renderer.
     std::shared_ptr<WorkPool> pool = std::make_shared<WorkPool>();
+    std::atomic<bool> profiling{false};
+    std::atomic<int> directLimit{kDefaultDirectLimit};
+    std::atomic<size_t> lastSetBytes{0};
+    std::vector<MetalRenderer::PassTime> passTimes;  // guarded by mutex
+
+    // sp_fused specialised for one stage shape, built on first use, by (device, shape).
+    std::map<std::pair<uintptr_t, std::array<int, 6>>, id<MTLComputePipelineState>> fused;
+
+    id<MTLComputePipelineState> fusedFor(id<MTLDevice> device, id<MTLLibrary> library, const Pass& p) {
+        const std::array<int, 6> shape{p.combine, p.post, p.channels, p.sum >= 0 ? 1 : 0, p.nLobes, p.kinds};
+        const auto key = std::make_pair(reinterpret_cast<uintptr_t>((__bridge void*)device), shape);
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = fused.find(key);
+        if (it != fused.end()) return it->second;
+        MTLFunctionConstantValues* fc = [MTLFunctionConstantValues new];
+        for (int k = 0; k < 6; ++k) {
+            if (k == 3) {
+                const bool b = p.sum >= 0;
+                [fc setConstantValue:&b type:MTLDataTypeBool atIndex:NSUInteger(k)];
+            } else {
+                [fc setConstantValue:&shape[size_t(k)] type:MTLDataTypeInt atIndex:NSUInteger(k)];
+            }
+        }
+        NSError* e = nil;
+        id<MTLFunction> fn = [library newFunctionWithName:@"sp_fused" constantValues:fc error:&e];
+        id<MTLComputePipelineState> pso = fn ? [device newComputePipelineStateWithFunction:fn error:&e] : nil;
+        if (pso) fused[key] = pso;
+        return pso;
+    }
 
     bool pipelinesFor(id<MTLDevice> device, Pipelines* out, std::string* err) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -382,12 +624,11 @@ struct MetalRenderer::Impl {
             return true;
         };
         Pipelines p;
-        if (!build("film_kernel", &p.film) || !build("sp_expose", &p.expose) || !build("sp_blur_h", &p.blurH) ||
-            !build("sp_blur_v", &p.blurV) || !build("sp_box_down", &p.boxDown) || !build("sp_up", &p.up) ||
-            !build("sp_clear", &p.clear) || !build("sp_bloom_mix", &p.bloomMix) ||
-            !build("sp_halation_add", &p.halationAdd) || !build("sp_develop", &p.develop) ||
-            !build("sp_edge", &p.edge) || !build("sp_print_expose", &p.printExpose) ||
-            !build("sp_finish", &p.finish))
+        p.library = library;
+        if (!build("film_kernel", &p.film) || !build("sp_expose", &p.expose) || !build("sp_box_down", &p.boxDown) ||
+            !build("sp_box_down2", &p.boxDown2) || !build("sp_up", &p.up) ||
+            !build("sp_blur_h_tiled", &p.blurHTiled) || !build("sp_blur_h_block", &p.blurHBlock) ||
+            !build("sp_blur_v_block", &p.blurV) || !build("sp_finish", &p.finish))
             return false;
         pipelines[key] = p;
         *out = p;
@@ -428,6 +669,23 @@ MetalRenderer::~MetalRenderer() = default;
 bool MetalRenderer::isValid() const { return impl_->valid; }
 
 const std::string& MetalRenderer::error() const { return impl_->error; }
+
+MetalRenderer::PoolStats MetalRenderer::poolStats() const {
+    PoolStats st;
+    st.idleMaxPerDevice = impl_->pool->idleMaxPerDevice();
+    st.inFlight = impl_->pool->inFlight();
+    st.lastSetBytes = impl_->lastSetBytes.load();
+    return st;
+}
+
+void MetalRenderer::setPassProfiling(bool on) { impl_->profiling = on; }
+
+void MetalRenderer::setDirectBlurLimit(int reads) { impl_->directLimit = reads; }
+
+std::vector<MetalRenderer::PassTime> MetalRenderer::lastPassTimes() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->passTimes;
+}
 
 size_t MetalRenderer::cachedFilmCount() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -549,16 +807,22 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
         }
         for (int k = 0; k < 9; ++k) u.displayMatrix[k] = film->displayMatrix[size_t(k)];
 
-        SpatialPlan plan(W, H);
-        int finalSlot = kFull0;
+        SpatialPlan plan(W, H, ww, wh, std::min<size_t>(device.maxThreadgroupMemoryLength, 32768),
+                         impl_->directLimit.load());
         std::shared_ptr<WorkSet> set;
         id<MTLBuffer> tapsBuf = nil;
         if (W > 0 && H > 0) {
-            finalSlot = planStages(plan, film->optics, s);
+            planStages(plan, film->optics, s);
             const size_t fullPx = size_t(W) * size_t(H);
             if (fullPx * 16 > device.maxBufferLength) return false;
-            set = impl_->pool->take(device, fullPx, plan.smallPx);
+            set = impl_->pool->take(device, fullPx, plan.smallPx, plan.resPx);
             if (!set) return false;
+            impl_->lastSetBytes = set->bytes();
+            for (Pass& p : plan.passes)
+                if (p.kind == Pass::Fused && !(p.pso = impl_->fusedFor(device, pl.library, p))) {
+                    impl_->pool->give(set);
+                    return false;
+                }
             if (plan.taps.empty()) plan.taps.push_back(0.f);
             tapsBuf = upload(device, plan.taps);
             if (!tapsBuf) {
@@ -567,8 +831,119 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
             }
         }
         const auto slot = [&](int i) -> id<MTLBuffer> {
+            if (i == kDst) return dst;
             return i < kSmall0 ? set->full[i] : set->small[i - kSmall0];
         };
+
+        std::function<void(id<MTLComputeCommandEncoder>, const Pass&)> encodePass;
+        // Every GPU step of the render, in order: expose, the plan's passes, finish.
+        struct Step {
+            std::string name;
+            std::function<void(id<MTLComputeCommandEncoder>)> encode;
+        };
+        std::vector<Step> steps;
+        if (set) {
+            steps.push_back({"expose", [&](id<MTLComputeCommandEncoder> enc) {
+                                 [enc setBuffer:src offset:0 atIndex:0];
+                                 [enc setBuffer:slot(kFull0) offset:0 atIndex:1];
+                                 [enc setBytes:&u length:sizeof(u) atIndex:2];
+                                 [enc setBuffer:g->lutEHalf offset:0 atIndex:3];
+                                 dispatch(enc, pl.expose, W, H);
+                             }});
+            for (const Pass& p : plan.passes)
+                steps.push_back({std::string(p.stage) + " " +
+                                     passName(p, p.kind == Pass::Fused ? plan.gridW(p) : p.u.width,
+                                              p.kind == Pass::Fused ? plan.gridH(p) : p.u.height),
+                                 [&, pp = &p](id<MTLComputeCommandEncoder> enc) { encodePass(enc, *pp); }});
+        }
+        if (!set)  // empty work rect: finishStage alone (every window pixel becomes 0)
+            steps.push_back({"finish", [&](id<MTLComputeCommandEncoder> enc) {
+                             [enc setBuffer:dst offset:0 atIndex:0];
+                             [enc setBuffer:dst offset:0 atIndex:1];
+                             [enc setBytes:&u length:sizeof(u) atIndex:2];
+                             [enc setBuffer:g->lutD offset:0 atIndex:3];
+                             [enc setBuffer:src offset:0 atIndex:4];
+                             dispatch(enc, pl.finish, ww, wh);
+                         }});
+        // Binds and dispatches one plan pass.
+        encodePass = [&](id<MTLComputeCommandEncoder> enc, const Pass& p) {
+            switch (p.kind) {
+                case Pass::Fused: {
+                    [enc setComputePipelineState:p.pso];
+                    [enc setBuffer:slot(p.in) offset:0 atIndex:0];
+                    [enc setBuffer:slot(p.out) offset:0 atIndex:1];
+                    [enc setBytes:&p.fu length:sizeof(p.fu) atIndex:2];
+                    [enc setBuffer:tapsBuf offset:0 atIndex:3];
+                    [enc setBuffer:slot(kFull2) offset:0 atIndex:4];
+                    [enc setBuffer:slot(kSmallRes) offset:0 atIndex:5];
+                    [enc setBuffer:slot(p.sum >= 0 ? p.sum : kFull2) offset:0 atIndex:6];
+                    [enc setBytes:&u length:sizeof(u) atIndex:7];
+                    [enc setBuffer:g->curves offset:0 atIndex:8];
+                    [enc setBuffer:g->lutPE offset:0 atIndex:9];
+                    [enc setBuffer:g->lutD offset:0 atIndex:10];
+                    [enc setBuffer:src offset:0 atIndex:11];
+                    [enc setBuffer:dst offset:0 atIndex:12];
+                    // One thread per OF_BLOCK pixels of a column.
+                    [enc dispatchThreads:MTLSizeMake(NSUInteger(plan.gridW(p)),
+                                                     NSUInteger((plan.gridH(p) + OF_BLOCK - 1) / OF_BLOCK), 1)
+                        threadsPerThreadgroup:threadgroupFor(p.pso)];
+                    return;
+                }
+                case Pass::BoxDown:
+                case Pass::BoxDown2:
+                case Pass::Up:
+                    [enc setBuffer:slot(p.in) offset:p.inOffset * 4 * sizeof(float) atIndex:0];
+                    [enc setBuffer:slot(p.out) offset:0 atIndex:1];
+                    [enc setBytes:&p.u length:sizeof(p.u) atIndex:2];
+                    if (p.kind == Pass::BoxDown2) [enc setBuffer:slot(p.out2) offset:0 atIndex:3];
+                    dispatch(enc, p.kind == Pass::Up ? pl.up : p.kind == Pass::BoxDown ? pl.boxDown : pl.boxDown2,
+                             p.u.width, p.u.height);
+                    return;
+                case Pass::BlurHTiled:
+                case Pass::BlurHBlock:
+                case Pass::BlurV:
+                    [enc setBuffer:slot(p.in) offset:0 atIndex:0];
+                    [enc setBuffer:slot(p.out) offset:p.outOffset * 4 * sizeof(float) atIndex:1];
+                    [enc setBytes:&p.u length:sizeof(p.u) atIndex:2];
+                    [enc setBuffer:tapsBuf offset:0 atIndex:3];
+                    if (p.kind == Pass::BlurHTiled) {
+                        [enc setComputePipelineState:pl.blurHTiled];
+                        [enc setThreadgroupMemoryLength:(p.tileBytes + 15) / 16 * 16 atIndex:0];
+                        [enc dispatchThreadgroups:MTLSizeMake((NSUInteger(p.u.width) + OF_HTILE - 1) / OF_HTILE,
+                                                              NSUInteger(p.u.height), 1)
+                            threadsPerThreadgroup:MTLSizeMake(OF_HTILE, 1, 1)];
+                    } else if (p.kind == Pass::BlurHBlock) {  // x: rows, y: blocks of OF_BLOCK pixels
+                        dispatch(enc, pl.blurHBlock, p.u.height, (p.u.width + OF_BLOCK - 1) / OF_BLOCK);
+                    } else {
+                        dispatch(enc, pl.blurV, p.u.width, (p.u.height + OF_BLOCK - 1) / OF_BLOCK);
+                    }
+                    return;
+            }
+        };
+
+        bool profiling = impl_->profiling.load();
+        if (profiling) {
+            // One command buffer per step, each waited for and timed (diagnostics only).
+            std::vector<PassTime> times;
+            bool good = true;
+            for (const Step& st : steps) {
+                id<MTLCommandBuffer> cmd = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> enc = cmd ? [cmd computeCommandEncoder] : nil;
+                if (!enc) {
+                    good = false;
+                    break;
+                }
+                st.encode(enc);
+                [enc endEncoding];
+                [cmd commit];
+                [cmd waitUntilCompleted];
+                times.push_back({st.name, (cmd.GPUEndTime - cmd.GPUStartTime) * 1e3});
+            }
+            if (set) impl_->pool->give(set);
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            impl_->passTimes = std::move(times);
+            return good;
+        }
 
         id<MTLCommandBuffer> cmd = [queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = cmd ? [cmd computeCommandEncoder] : nil;
@@ -577,59 +952,7 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
             return false;  // report failure rather than leave the frame unwritten
         }
         cmd.label = @"OpenFilm spatial";
-
-        if (set) {
-            // exposeStage
-            [enc setBuffer:src offset:0 atIndex:0];
-            [enc setBuffer:slot(kFull0) offset:0 atIndex:1];
-            [enc setBytes:&u length:sizeof(u) atIndex:2];
-            [enc setBuffer:g->lutE offset:0 atIndex:3];
-            dispatch(enc, pl.expose, W, H);
-
-            for (const Pass& p : plan.passes) {
-                id<MTLComputePipelineState> pso = nil;
-                switch (p.kind) {
-                    case Pass::BlurH: pso = pl.blurH; break;
-                    case Pass::BlurV: pso = pl.blurV; break;
-                    case Pass::BoxDown: pso = pl.boxDown; break;
-                    case Pass::Up: pso = pl.up; break;
-                    case Pass::Clear: pso = pl.clear; break;
-                    case Pass::BloomMix: pso = pl.bloomMix; break;
-                    case Pass::HalationAdd: pso = pl.halationAdd; break;
-                    case Pass::Develop: pso = pl.develop; break;
-                    case Pass::Edge: pso = pl.edge; break;
-                    case Pass::PrintExpose: pso = pl.printExpose; break;
-                }
-                // Two-image passes read `in` at 0 and write `out` at 1; combine passes update `out`
-                // (bound at 0) from `in` (at 1); per-pixel stages work on `out` in place at 0.
-                const bool combine = p.kind == Pass::BloomMix || p.kind == Pass::HalationAdd || p.kind == Pass::Edge;
-                const bool inPlace = p.kind == Pass::Develop || p.kind == Pass::PrintExpose;
-                if (combine) {
-                    [enc setBuffer:slot(p.out) offset:0 atIndex:0];
-                    [enc setBuffer:slot(p.in) offset:0 atIndex:1];
-                } else if (inPlace) {
-                    [enc setBuffer:slot(p.out) offset:0 atIndex:0];
-                } else {
-                    if (p.in >= 0) [enc setBuffer:slot(p.in) offset:0 atIndex:0];
-                    [enc setBuffer:slot(p.out) offset:0 atIndex:1];
-                }
-                [enc setBytes:&p.u length:sizeof(p.u) atIndex:2];
-                if (p.kind == Pass::BlurH || p.kind == Pass::BlurV) [enc setBuffer:tapsBuf offset:0 atIndex:3];
-                if (inPlace) {
-                    [enc setBytes:&u length:sizeof(u) atIndex:3];
-                    [enc setBuffer:p.kind == Pass::Develop ? g->curves : g->lutPE offset:0 atIndex:4];
-                }
-                dispatch(enc, pso, p.u.width, p.u.height);
-            }
-        }
-
-        // finishStage: every window pixel (zeros where the window leaves the source).
-        [enc setBuffer:set ? slot(finalSlot) : dst offset:0 atIndex:0];
-        [enc setBuffer:dst offset:0 atIndex:1];
-        [enc setBytes:&u length:sizeof(u) atIndex:2];
-        [enc setBuffer:g->lutD offset:0 atIndex:3];
-        [enc setBuffer:src offset:0 atIndex:4];
-        dispatch(enc, pl.finish, ww, wh);
+        for (const Step& st : steps) st.encode(enc);
         [enc endEncoding];
 
         // The command buffer keeps every bound buffer alive until the GPU is done; the work set

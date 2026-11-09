@@ -41,6 +41,10 @@ class Lut3D {
   // Node i sits at domain position (i/(N-1))^2 when denseDarks is set, else i/(N-1).
   const std::vector<float>& data() const { return data_; }
 
+  // Rounds every node value to the nearest half-float (through _Float16), so the table can live on
+  // the GPU as half with no change to any lookup.
+  void roundToHalf();
+
  private:
   int size_;
   Vec3 min_, max_;
@@ -59,7 +63,7 @@ struct Curve1D {
 constexpr double kExposureLutEps = 1e-3;
 
 struct BakedFilm {
-  Lut3D lutE;                         // DI [0,1]^3 -> log10(E + kExposureLutEps), E = 10^logE
+  Lut3D lutE;                         // DI [0,1]^3 -> log10(E + kExposureLutEps), E = 10^logE; values exact in half
   std::array<Curve1D, 3> negCurves;   // log E over [curve min - 1, curve max + 1] -> Status M density
   Lut3D lutPE;                        // neg Status M density (reachable domain) -> print log E, zero offsets
   std::array<Curve1D, 3> printCurves; // print log E over [print curve min - 1, max + 1] -> Status A density

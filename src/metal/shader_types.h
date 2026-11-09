@@ -78,6 +78,47 @@ typedef struct {
     float weight[3];        // per-channel weight (lobe weight, layer weight, k, h w_c, bloom amount)
 } OFPassUniforms;
 
+// ---- Fused spread + combine + pointwise stages (sp_fused) ----
+// One pass per spatial stage: it sums the stage's lobes (in lobe order, as spread() does), combines
+// the sum with the stage's input pixel, then runs the pointwise stages that follow, all in registers.
+#define OF_MAX_LOBES 8
+#define OF_BLOCK 8     // pixels per thread along the blur in the blocked blurs and sp_fused
+#define OF_HTILE 256   // sp_blur_h_tiled: threads (pixels) per row segment
+
+// How sp_fused gets one full-resolution or reduced lobe.
+#define OF_LOBE_DIRECT 0   // full resolution, small kernel: horizontal pass computed in the fused pass
+#define OF_LOBE_PRE_H 1    // full resolution: horizontal pass already in the T buffer; vertical in the fused pass
+#define OF_LOBE_REDUCED 2  // reduced resolution, already blurred into the small-results buffer; bilinear up here
+
+typedef struct {
+    int radius[3];     // per-channel blur radius (0 = copy); DIRECT / PRE_H
+    int tapOffset[3];  // where each channel's taps start
+    float weight[3];   // per-channel weight of this lobe in the sum
+    int factor;        // REDUCED: f
+    int sw, sh;        // REDUCED: coarse grid size
+    int smallOffset;   // REDUCED: first float4 of its result in the small-results buffer
+} OFLobe;
+
+// Combine of the lobe sum S with the stage's input pixel X.
+#define OF_COMBINE_STORE 0     // S (per-layer scatter)
+#define OF_COMBINE_BLOOM 1     // (1 - a) X + a S, a = cw[0]
+#define OF_COMBINE_HALATION 2  // X_c + cw_c S_r
+#define OF_COMBINE_EDGE 3      // X_c + cw_c (X_c - S_c)
+
+// Pointwise stages run after the combine, in this order (bit mask).
+#define OF_POST_DEVELOP_NEG 1
+#define OF_POST_PRINT_EXPOSE 2
+#define OF_POST_DEVELOP_PRINT 4
+#define OF_POST_FINISH 8  // grid is the render window; writes dst (as sp_finish)
+
+// The stage's shape (combine, post, channels, hasAccum, lobe count and kinds) is also passed as
+// function constants, so each stage gets its own specialised pipeline.
+typedef struct {
+    int width, height;  // work rect size
+    float cw[3];        // combine weights
+    OFLobe lobes[OF_MAX_LOBES];
+} OFFuseUniforms;
+
 #if defined(__cplusplus) && !defined(__METAL_VERSION__)
 // The Metal compiler lays these out with the same rules (4-byte scalars, no padding); pin the
 // layout on the C++ side so an edit that would desynchronise the two fails to compile.
@@ -103,6 +144,11 @@ static_assert(offsetof(OFPassUniforms, factor) == 16 && offsetof(OFPassUniforms,
                   offsetof(OFPassUniforms, tapOffset) == 36 && offsetof(OFPassUniforms, weight) == 48 &&
                   sizeof(OFPassUniforms) == 60,
               "OFPassUniforms layout");
+static_assert(sizeof(OFLobe) == 52 && offsetof(OFLobe, weight) == 24 && offsetof(OFLobe, smallOffset) == 48,
+              "OFLobe layout");
+static_assert(offsetof(OFFuseUniforms, cw) == 8 && offsetof(OFFuseUniforms, lobes) == 20 &&
+                  sizeof(OFFuseUniforms) == 20 + 52 * OF_MAX_LOBES,
+              "OFFuseUniforms layout");
 #endif
 
 #endif

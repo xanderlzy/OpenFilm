@@ -22,8 +22,11 @@ inline float sane(float v) { return isfinite(v) ? v : 0.0f; }
 
 inline bool inside(OFImageGeom g, int x, int y) { return x >= g.x1 && x < g.x2 && y >= g.y1 && y < g.y2; }
 
-// Lut3D::lookup: clamp into the table's domain, find the cell, tetrahedral interpolation.
-float3 lookup(device const float* data, constant OFLut3D& L, float3 in) {
+// Lut3D::lookup: clamp into the table's domain, find the cell, tetrahedral interpolation. The node
+// values may be stored as float or as half (a table whose values are exact in half; see
+// BakedFilm::lutE); either way the interpolation runs in float.
+template <typename T>
+float3 lookup(device const T* data, constant OFLut3D& L, float3 in) {
     const int n = L.size;
     int i0[3];
     float f[3];
@@ -53,7 +56,7 @@ float3 lookup(device const float* data, constant OFLut3D& L, float3 in) {
     const float w0 = 1.0f - f[o0], w1 = f[o0] - f[o1], w2 = f[o1] - f[o2], w3 = f[o2];
     float3 out;
     for (int k = 0; k < 3; ++k)
-        out[k] = w0 * data[p0 + k] + w1 * data[p1 + k] + w2 * data[p2 + k] + w3 * data[p3 + k];
+        out[k] = w0 * float(data[p0 + k]) + w1 * float(data[p1 + k]) + w2 * float(data[p2 + k]) + w3 * float(data[p3 + k]);
     return out;
 }
 

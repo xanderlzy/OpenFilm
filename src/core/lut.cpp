@@ -73,6 +73,10 @@ float Curve1D::eval(float x) const {
   return values[i] + (values[i + 1] - values[i]) * t;
 }
 
+void Lut3D::roundToHalf() {
+  for (float& v : data_) v = float(_Float16(v));
+}
+
 std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, int lutSizePE, int lutSizeD) {
   Lut3D lutE(lutSizeE, {0, 0, 0}, {1, 1, 1}, true);
   // What the table stores matters. Raw log E is wrong near black: the black corner sits at the
@@ -87,6 +91,10 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, 
     for (size_t c = 0; c < 3; ++c) q[c] = std::log10(std::pow(10.0, logE[c]) + kExposureLutEps);
     return q;
   });
+  // Half precision (a log10 step of at most 2^-10 near the top of the range, 0.23 % in E) keeps the
+  // table within the 0.5 dE2000 budget and halves its size on the GPU (12.9 MB instead of 25.8 MB),
+  // where random-access footage reads it from all over memory.
+  lutE.roundToHalf();
 
   std::array<Curve1D, 3> curves;
   constexpr int kCurveSamples = 4096;
