@@ -109,11 +109,12 @@ void dispatch(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pso,
 // reduced lobe's result for the fused pass that reads them.
 struct WorkSet {
     uintptr_t device = 0;
-    size_t fullPx = 0, smallPx = 0, resPx = 0;  // capacity in float4 pixels
+    // Capacity: full and scratch images in pixels (three float planes each), the results in floats.
+    size_t fullPx = 0, smallPx = 0, resPx = 0;
     id<MTLBuffer> full[3];
     id<MTLBuffer> small[4];  // scratch x 3, results
 
-    size_t bytes() const { return (3 * fullPx + 3 * smallPx + resPx) * 4 * sizeof(float); }
+    size_t bytes() const { return (3 * (3 * fullPx + 3 * smallPx) + resPx) * sizeof(float); }
 };
 
 // Per-device pool of WorkSets, shared by every render thread. A render takes a set big enough for
@@ -149,14 +150,14 @@ public:
         set->fullPx = fullPx;
         set->smallPx = smallPx;
         set->resPx = resPx;
-        const auto bytes = [](size_t px) { return std::max<size_t>(px, 1) * 4 * sizeof(float); };
+        const auto bytes = [](size_t floats) { return std::max<size_t>(floats, 1) * sizeof(float); };
         for (auto& b : set->full) {
-            b = [device newBufferWithLength:bytes(fullPx) options:MTLResourceStorageModePrivate];
+            b = [device newBufferWithLength:bytes(3 * fullPx) options:MTLResourceStorageModePrivate];
             if (!b) return failed();
             b.label = @"OpenFilm work";
         }
         for (int k = 0; k < 4; ++k) {
-            id<MTLBuffer> b = [device newBufferWithLength:bytes(k < 3 ? smallPx : resPx)
+            id<MTLBuffer> b = [device newBufferWithLength:bytes(k < 3 ? 3 * smallPx : resPx)
                                                   options:MTLResourceStorageModePrivate];
             if (!b) return failed();
             b.label = @"OpenFilm work (reduced)";
@@ -221,7 +222,7 @@ enum Slot { kFull0, kFull1, kFull2, kSmall0, kSmall1, kSmall2, kSmallRes, kDst }
 struct Pass {
     enum Kind { BoxDown, BoxDown2, BlurHTiled, BlurHBlock, BlurV, Up, Fused } kind;
     int in = -1, out = -1, out2 = -1;  // slots (out2: BoxDown2's 2f result)
-    size_t inOffset = 0, outOffset = 0;  // float4 pixels into `in` / `out` (reduced results)
+    size_t inOffset = 0, outOffset = 0;  // floats into `in` / `out` (reduced results)
     OFPassUniforms u{};
     size_t tileBytes = 0;              // BlurHTiled: threadgroup memory
     const char* stage = "";            // for profiling
@@ -301,7 +302,7 @@ public:
                 resAt[i] = resUsed;
                 reduce(img, paired ? (factor[i] == factor[pa] ? kSmall0 : kSmall2) : -1, st.lobes[i], factor[i],
                        resUsed, i < first ? 3 : st.channels);
-                resUsed += size_t((w_ + factor[i] - 1) / factor[i]) * size_t((h_ + factor[i] - 1) / factor[i]);
+                resUsed += 3 * size_t((w_ + factor[i] - 1) / factor[i]) * size_t((h_ + factor[i] - 1) / factor[i]);
             }
         resPx = std::max(resPx, resUsed);
 
@@ -628,7 +629,7 @@ struct MetalRenderer::Impl {
         if (!build("film_kernel", &p.film) || !build("sp_expose", &p.expose) || !build("sp_box_down", &p.boxDown) ||
             !build("sp_box_down2", &p.boxDown2) || !build("sp_up", &p.up) ||
             !build("sp_blur_h_tiled", &p.blurHTiled) || !build("sp_blur_h_block", &p.blurHBlock) ||
-            !build("sp_blur_v_block", &p.blurV) || !build("sp_finish", &p.finish))
+            !build("sp_blur_v_block", &p.blurV) || !build("sp_finish_empty", &p.finish))
             return false;
         pipelines[key] = p;
         *out = p;
@@ -814,7 +815,7 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
         if (W > 0 && H > 0) {
             planStages(plan, film->optics, s);
             const size_t fullPx = size_t(W) * size_t(H);
-            if (fullPx * 16 > device.maxBufferLength) return false;
+            if (fullPx * 3 * sizeof(float) > device.maxBufferLength) return false;
             set = impl_->pool->take(device, fullPx, plan.smallPx, plan.resPx);
             if (!set) return false;
             impl_->lastSetBytes = set->bytes();
@@ -858,11 +859,8 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
         }
         if (!set)  // empty work rect: finishStage alone (every window pixel becomes 0)
             steps.push_back({"finish", [&](id<MTLComputeCommandEncoder> enc) {
-                             [enc setBuffer:dst offset:0 atIndex:0];
                              [enc setBuffer:dst offset:0 atIndex:1];
                              [enc setBytes:&u length:sizeof(u) atIndex:2];
-                             [enc setBuffer:g->lutD offset:0 atIndex:3];
-                             [enc setBuffer:src offset:0 atIndex:4];
                              dispatch(enc, pl.finish, ww, wh);
                          }});
         // Binds and dispatches one plan pass.
@@ -892,18 +890,18 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                 case Pass::BoxDown:
                 case Pass::BoxDown2:
                 case Pass::Up:
-                    [enc setBuffer:slot(p.in) offset:p.inOffset * 4 * sizeof(float) atIndex:0];
+                    [enc setBuffer:slot(p.in) offset:p.inOffset * sizeof(float) atIndex:0];
                     [enc setBuffer:slot(p.out) offset:0 atIndex:1];
                     [enc setBytes:&p.u length:sizeof(p.u) atIndex:2];
                     if (p.kind == Pass::BoxDown2) [enc setBuffer:slot(p.out2) offset:0 atIndex:3];
                     dispatch(enc, p.kind == Pass::Up ? pl.up : p.kind == Pass::BoxDown ? pl.boxDown : pl.boxDown2,
-                             p.u.width, p.u.height);
+                             p.u.width, p.kind == Pass::Up ? p.u.height : 3 * p.u.height);  // box: per channel
                     return;
                 case Pass::BlurHTiled:
                 case Pass::BlurHBlock:
                 case Pass::BlurV:
                     [enc setBuffer:slot(p.in) offset:0 atIndex:0];
-                    [enc setBuffer:slot(p.out) offset:p.outOffset * 4 * sizeof(float) atIndex:1];
+                    [enc setBuffer:slot(p.out) offset:p.outOffset * sizeof(float) atIndex:1];
                     [enc setBytes:&p.u length:sizeof(p.u) atIndex:2];
                     [enc setBuffer:tapsBuf offset:0 atIndex:3];
                     if (p.kind == Pass::BlurHTiled) {
@@ -912,8 +910,8 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger(p.u.width) + OF_HTILE - 1) / OF_HTILE,
                                                               NSUInteger(p.u.height), 1)
                             threadsPerThreadgroup:MTLSizeMake(OF_HTILE, 1, 1)];
-                    } else if (p.kind == Pass::BlurHBlock) {  // x: rows, y: blocks of OF_BLOCK pixels
-                        dispatch(enc, pl.blurHBlock, p.u.height, (p.u.width + OF_BLOCK - 1) / OF_BLOCK);
+                    } else if (p.kind == Pass::BlurHBlock) {  // x: rows, y: blocks of OF_HBLOCK pixels
+                        dispatch(enc, pl.blurHBlock, p.u.height, (p.u.width + OF_HBLOCK - 1) / OF_HBLOCK);
                     } else {
                         dispatch(enc, pl.blurV, p.u.width, (p.u.height + OF_BLOCK - 1) / OF_BLOCK);
                     }

@@ -83,6 +83,7 @@ typedef struct {
 // the sum with the stage's input pixel, then runs the pointwise stages that follow, all in registers.
 #define OF_MAX_LOBES 8
 #define OF_BLOCK 8     // pixels per thread along the blur in the blocked blurs and sp_fused
+#define OF_HBLOCK 16   // the same for sp_blur_h_block (wide horizontal blurs)
 #define OF_HTILE 256   // sp_blur_h_tiled: threads (pixels) per row segment
 
 // How sp_fused gets one full-resolution or reduced lobe.
@@ -96,7 +97,7 @@ typedef struct {
     float weight[3];   // per-channel weight of this lobe in the sum
     int factor;        // REDUCED: f
     int sw, sh;        // REDUCED: coarse grid size
-    int smallOffset;   // REDUCED: first float4 of its result in the small-results buffer
+    int smallOffset;   // REDUCED: first float of its result (three planes) in the small-results buffer
 } OFLobe;
 
 // Combine of the lobe sum S with the stage's input pixel X.
