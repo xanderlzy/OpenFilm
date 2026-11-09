@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "core/film_model.hpp"
+#include "core/grain_model.hpp"
 #include "core/optics.hpp"
 
 namespace openfilm {
@@ -71,6 +72,7 @@ struct BakedFilm {
   std::array<float, 9> displayMatrix; // XYZ -> linear display light, row-major
   Vec3 balance;                       // auto-balance offsets (log E)
   FilmOptics optics;                  // sharpness fits and halation inputs, in mm on the film
+  FilmGrain grain;                    // dye-cloud grain (radius in mm, datasheet rms per layer); invalid without granularity data
 };
 
 // Default sizes were chosen to keep baked-vs-direct error under 0.5 dE2000 (see the accuracy tests).
