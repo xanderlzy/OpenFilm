@@ -969,9 +969,9 @@
     ],
     "sources": [
       {
-        "title": "ASSUMPTION: base thickness 0.127 mm (5 mil cellulose-triacetate camera-negative base). Britannica gives 0.08-0.2 mm as the typical photographic base range; no Kodak datasheet figure for 5219 was found.",
-        "url": "https://www.britannica.com/technology/technology-of-photography/Filters",
-        "note": "Typical range only; 0.127 mm is the assumed value."
+        "title": "BASE (7219 datasheet p.1): 'KODAK VISION3 500T Color Negative Films 5219 and 7219 have an acetate safety base with rem-jet backing'. ASSUMPTION: base thickness 0.127 mm (5 mil); the datasheet gives no thickness.",
+        "url": "https://www.kodak.com/content/products-brochures/Film/VISION3-500T-Color-Negative-Film-7219-TECHNICAL-DATA.pdf",
+        "note": "Acetate base with rem-jet is datasheet fact; 0.127 mm is assumed (Britannica gives 0.08-0.2 mm as the typical photographic base range)."
       },
       {
         "title": "ASSUMPTION: reflectanceOff 0.29 = diffuse internal reflectance of a base/air interface, 1 - (1 - 0.092)/n^2 with n = 1.48 (cellulose triacetate), about 0.585, times an assumed 0.5 ratio of red light reaching the base to red light absorbed in the emulsion.",
@@ -979,8 +979,7 @@
       },
       {
         "title": "ASSUMPTION: reflectanceOn 0.01 (carbon-black rem-jet leaves about 1 % of the light returned).",
-        "url": "https://www.Wikipedia.org/wiki/Remjet",
-        "note": "Source describes the rem-jet layer's purpose; the 1 % figure is assumed. Note Kodak VISION3 replaced rem-jet with an emulsion-side anti-halation undercoat (https://theasc.com/article/kodak-enhances-vision3/); 'on' is used as the stand-in for that stock's as-shipped state."
+        "note": "'On' is the as-shipped state: the 7219 datasheet p.1 BASE section states the stock has rem-jet backing. The 1 % figure is assumed."
       },
       {
         "title": "layerSplit is derived by build_stock.py from this stock's linear layer sensitivities over 600-700 nm, not typed in.",
