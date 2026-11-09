@@ -588,19 +588,76 @@ TEST_CASE("spatial: concurrent renders of different sizes") {
     }
 }
 
-TEST_CASE("spatial: the work pool keeps at most one idle set per device") {
-    // Runs after the concurrent test above, which had up to 8 sets out at once. Every completion
-    // handler must have returned its set before we look.
-    for (int i = 0; i < 200 && renderer().poolStats().inFlight > 0; ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    const auto st = renderer().poolStats();
+TEST_CASE("spatial: the work pool keeps at most three idle sets, one once they expire") {
+    // Runs after the concurrent test above, which had up to 3 sets out at once (the cap). Every
+    // completion handler must have returned its set before we look.
+    const auto settle = [] {
+        for (int i = 0; i < 200 && renderer().poolStats().inFlight > 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    };
+    settle();
+    auto st = renderer().poolStats();
     CHECK(st.inFlight == 0);
-    CHECK(st.idleMaxPerDevice <= 1);
+    CHECK(st.idleMaxPerDevice <= 3);
     // A set left idle (volatile) is taken again and still renders correctly.
     const auto g = tight(0, 0, 160, 90);
     checkSpatial(g, g, {0, 0, 160, 90}, LookControls{}, spatialAllOn(160 / 24.89), pointsEdgesNoise(73, 160, 90));
+    // Idle sets beyond the most recent one are released once idle a while (checked on take/give).
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     checkSpatial(g, g, {0, 0, 160, 90}, LookControls{}, spatialAllOn(160 / 24.89), pointsEdgesNoise(74, 160, 90));
-    CHECK(renderer().poolStats().idleMaxPerDevice <= 1);
+    settle();
+    st = renderer().poolStats();
+    CHECK(st.inFlight == 0);
+    CHECK(st.idleMaxPerDevice <= 1);
+}
+
+// Renders issued back to back without waiting (a host queueing frames ahead) must not each get
+// their own work set: at most three are out per device, and a render over the cap waits for one to
+// come back and reuses it. Every frame must still match its CPU render.
+TEST_CASE("spatial: at most three work sets in flight") {
+    REQUIRE(renderer().isValid());
+    const int w = 1280, h = 720, n = 12;
+    const auto g = tight(0, 0, w, h);
+    const auto baked = film();
+    const SpatialControls s = spatialAllOn(3840 / 24.89);  // UHD-sized kernels on a smaller frame
+    const RenderWindow win{0, 0, w, h};
+    id<MTLDevice> dev = device();
+    id<MTLCommandQueue> queue = [dev newCommandQueue];
+    std::vector<Frame> frames;
+    std::vector<id<MTLBuffer>> dsts;
+    std::vector<id<MTLBuffer>> srcs;
+    for (int i = 0; i < n; ++i) {
+        frames.push_back(makeFrame(g, g, pointsEdgesNoise(80 + unsigned(i), w, h)));
+        Frame& f = frames.back();
+        renderFilm(ConstImageView{f.src.data(), g}, ImageView{f.cpu.data(), g}, win, *baked, LookControls{}, s);
+        srcs.push_back([dev newBufferWithBytes:f.src.data() length:f.src.size() * 4 options:MTLResourceStorageModeShared]);
+        std::vector<float> fill(f.cpu.size(), kSentinel);
+        dsts.push_back([dev newBufferWithBytes:fill.data() length:fill.size() * 4 options:MTLResourceStorageModeShared]);
+    }
+    for (int i = 0; i < 200 && renderer().poolStats().inFlight > 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    renderer().resetPoolPeak();
+    for (int i = 0; i < n; ++i)
+        CHECK(renderer().render((__bridge void*)queue, (__bridge void*)srcs[size_t(i)], g,
+                                (__bridge void*)dsts[size_t(i)], g, win, baked, LookControls{}, s));
+    id<MTLCommandBuffer> fence = [queue commandBuffer];
+    [fence commit];
+    [fence waitUntilCompleted];
+    const size_t peak = renderer().poolStats().peakInFlight;
+    MESSAGE("peak work sets in flight: " << peak);
+    CHECK(peak <= 3);
+    double worst = 0;
+    bool alphaExact = true, outside = true;
+    for (int i = 0; i < n; ++i) {
+        const Result r = compare(frames[size_t(i)], static_cast<const float*>(dsts[size_t(i)].contents), win);
+        worst = std::max(worst, r.maxDiff);
+        alphaExact = alphaExact && r.alphaExact;
+        outside = outside && r.outsideUntouched;
+    }
+    MESSAGE("worst GPU-vs-CPU difference over " << n << " renders: " << worst);
+    CHECK(worst <= 1e-3);
+    CHECK(alphaExact);
+    CHECK(outside);
 }
 
 // The M4 speed budget: a UHD Super 35 frame of uniform noise (the M3 worst case: neighbouring

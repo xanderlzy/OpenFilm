@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <string>
 #include <map>
@@ -129,30 +131,53 @@ struct WorkSet {
 };
 
 // Per-device pool of WorkSets, shared by every render thread. A render takes a set big enough for
-// its work rect (the smallest that fits, else a new one) and gives it back from its command
-// buffer's completion handler, so a set is never reused while the GPU still works in it. At most
-// kMaxIdle sets per device are kept between renders (the largest stays), and idle sets are marked
-// volatile so the OS may reclaim their memory under pressure; take() makes a set non-volatile again
-// and drops it for a fresh one if the OS did.
+// its work rect (the smallest idle one that fits, else a new one) and gives it back from its command
+// buffer's completion handler, so a set is never reused while the GPU still works in it.
+//
+// Memory is bounded: at most kMaxSets sets exist per device, in flight and idle together (a UHD set
+// is ~500 MB). A render that would go over waits in take() until a set comes back, then reuses it
+// (or replaces it, when it is too small). take() is called with no renderer lock held, and give()
+// never waits, so completion handlers cannot stall. Idle sets are marked volatile so the OS may
+// reclaim their memory under pressure; take() makes a set non-volatile again and drops it for a
+// fresh one if the OS did. Besides the most recently returned one, idle sets are released once they
+// have been idle for kIdleExpiry (checked on every take and give; there is no timer).
 class WorkPool {
 public:
+    static constexpr size_t kMaxSets = 3;
+    static constexpr std::chrono::milliseconds kIdleExpiry{1000};
+
     std::shared_ptr<WorkSet> take(id<MTLDevice> device, size_t fullPx, size_t smallPx, size_t resPx) {
         const auto key = reinterpret_cast<uintptr_t>((__bridge void*)device);
         std::shared_ptr<WorkSet> reused;
+        std::vector<std::shared_ptr<WorkSet>> released;  // freed after the lock is dropped
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
+            Device& d = devices_[key];
+            returned_.wait(lock, [&] { return d.inFlight < kMaxSets; });
+            ++d.inFlight;
             ++inFlight_;
-            auto& idle = idle_[key];
-            auto best = idle.end();
-            for (auto it = idle.begin(); it != idle.end(); ++it)
-                if ((*it)->fullPx >= fullPx && (*it)->smallPx >= smallPx && (*it)->resPx >= resPx &&
-                    (best == idle.end() || (*it)->fullPx < (*best)->fullPx))
+            peak_ = std::max(peak_, d.inFlight);
+            expire(d, released);
+            auto best = d.idle.end();
+            for (auto it = d.idle.begin(); it != d.idle.end(); ++it)
+                if (it->set->fullPx >= fullPx && it->set->smallPx >= smallPx && it->set->resPx >= resPx &&
+                    (best == d.idle.end() || it->set->fullPx < best->set->fullPx))
                     best = it;
-            if (best != idle.end()) {
-                reused = *best;
-                idle.erase(best);
+            if (best != d.idle.end()) {
+                reused = best->set;
+                d.idle.erase(best);
+            } else {
+                // A new set is coming: drop idle ones (smallest first) so the total stays within the cap.
+                while (!d.idle.empty() && d.inFlight + d.idle.size() > kMaxSets) {
+                    auto smallest = std::min_element(d.idle.begin(), d.idle.end(), [](const Idle& a, const Idle& b) {
+                        return a.set->fullPx < b.set->fullPx;
+                    });
+                    released.push_back(std::move(smallest->set));
+                    d.idle.erase(smallest);
+                }
             }
         }
+        released.clear();
         if (reused && makeNonVolatile(*reused)) return reused;
         reused.reset();  // purged while idle (or never there): allocate afresh
         // Allocate outside the lock: large buffers take a while.
@@ -164,37 +189,39 @@ public:
         const auto bytes = [](size_t floats) { return std::max<size_t>(floats, 1) * sizeof(float); };
         for (auto& b : set->full) {
             b = [device newBufferWithLength:bytes(3 * fullPx) options:MTLResourceStorageModePrivate];
-            if (!b) return failed();
+            if (!b) return failed(key);
             b.label = @"OpenFilm work";
         }
         for (int k = 0; k < 4; ++k) {
             id<MTLBuffer> b = [device newBufferWithLength:bytes(k < 3 ? 3 * smallPx : resPx)
                                                   options:MTLResourceStorageModePrivate];
-            if (!b) return failed();
+            if (!b) return failed(key);
             b.label = @"OpenFilm work (reduced)";
             set->small[k] = b;
         }
         return set;
     }
 
+    // Never blocks beyond the pool's own short lock: called from completion handlers.
     void give(std::shared_ptr<WorkSet> set) {
         for (auto& b : set->full) [b setPurgeableState:MTLPurgeableStateVolatile];
         for (auto& b : set->small) [b setPurgeableState:MTLPurgeableStateVolatile];
-        std::lock_guard<std::mutex> lock(mutex_);
-        --inFlight_;
-        auto& idle = idle_[set->device];
-        idle.push_back(std::move(set));
-        while (idle.size() > kMaxIdle) {
-            auto smallest = std::min_element(idle.begin(), idle.end(),
-                                             [](const auto& a, const auto& b) { return a->fullPx < b->fullPx; });
-            idle.erase(smallest);
+        std::vector<std::shared_ptr<WorkSet>> released;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device& d = devices_[set->device];
+            --d.inFlight;
+            --inFlight_;
+            d.idle.push_back({std::move(set), Clock::now()});
+            expire(d, released);
         }
+        returned_.notify_all();
     }
 
     size_t idleMaxPerDevice() const {
         std::lock_guard<std::mutex> lock(mutex_);
         size_t n = 0;
-        for (const auto& kv : idle_) n = std::max(n, kv.second.size());
+        for (const auto& kv : devices_) n = std::max(n, kv.second.idle.size());
         return n;
     }
 
@@ -203,11 +230,44 @@ public:
         return inFlight_;
     }
 
+    size_t peakInFlight() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return peak_;
+    }
+
+    void resetPeak() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        peak_ = 0;
+        for (const auto& kv : devices_) peak_ = std::max(peak_, kv.second.inFlight);
+    }
+
 private:
-    static constexpr size_t kMaxIdle = 1;
+    using Clock = std::chrono::steady_clock;
+    struct Idle {
+        std::shared_ptr<WorkSet> set;
+        Clock::time_point since;
+    };
+    struct Device {
+        std::vector<Idle> idle;  // in the order they came back
+        size_t inFlight = 0;
+    };
     mutable std::mutex mutex_;
-    std::unordered_map<uintptr_t, std::vector<std::shared_ptr<WorkSet>>> idle_;
-    size_t inFlight_ = 0;
+    std::condition_variable returned_;
+    std::unordered_map<uintptr_t, Device> devices_;
+    size_t inFlight_ = 0;  // all devices
+    size_t peak_ = 0;      // most in flight on one device since resetPeak()
+
+    // Moves every idle set but the most recently returned one that has been idle for kIdleExpiry
+    // into `out` (freed by the caller once the lock is dropped).
+    static void expire(Device& d, std::vector<std::shared_ptr<WorkSet>>& out) {
+        if (d.idle.size() <= 1) return;
+        const auto now = Clock::now();
+        for (size_t i = d.idle.size() - 1; i-- > 0;)
+            if (now - d.idle[i].since >= kIdleExpiry) {
+                out.push_back(std::move(d.idle[i].set));
+                d.idle.erase(d.idle.begin() + std::ptrdiff_t(i));
+            }
+    }
 
     // Every buffer back to non-volatile; false if the OS discarded any of them while idle.
     static bool makeNonVolatile(WorkSet& set) {
@@ -219,9 +279,13 @@ private:
         return intact;
     }
 
-    std::shared_ptr<WorkSet> failed() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        --inFlight_;
+    std::shared_ptr<WorkSet> failed(uintptr_t key) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --devices_[key].inFlight;
+            --inFlight_;
+        }
+        returned_.notify_all();
         return nullptr;
     }
 };
@@ -739,9 +803,12 @@ MetalRenderer::PoolStats MetalRenderer::poolStats() const {
     PoolStats st;
     st.idleMaxPerDevice = impl_->pool->idleMaxPerDevice();
     st.inFlight = impl_->pool->inFlight();
+    st.peakInFlight = impl_->pool->peakInFlight();
     st.lastSetBytes = impl_->lastSetBytes.load();
     return st;
 }
+
+void MetalRenderer::resetPoolPeak() { impl_->pool->resetPeak(); }
 
 void MetalRenderer::setPassProfiling(bool on) { impl_->profiling = on; }
 

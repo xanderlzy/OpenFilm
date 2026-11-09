@@ -56,9 +56,11 @@ public:
     struct PoolStats {
         size_t idleMaxPerDevice = 0;
         size_t inFlight = 0;
+        size_t peakInFlight = 0;  // most sets out on any one device at once since resetPoolPeak()
         size_t lastSetBytes = 0;
     };
     PoolStats poolStats() const;
+    void resetPoolPeak();
 
     // When on, the spatial overload commits every pass as its own command buffer, waits for each, and
     // records its GPU time (so render() blocks). Off by default; for profiling only.
