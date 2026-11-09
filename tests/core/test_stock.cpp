@@ -5,8 +5,11 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+
+#include <nlohmann/json.hpp>
 
 #include "core/stock.hpp"
 
@@ -35,7 +38,12 @@ std::string stockJson(const std::string& layers, const std::string& curve, const
                       const std::string& type = "negative") {
   std::string layer = R"({"logSensitivity":[[500,-1],[505,-1]],"characteristicCurve":)" + curve + "}";
   std::string ls = layers.empty() ? R"("layers":{"red":)" + layer + ",\"green\":" + layer + ",\"blue\":" + layer + "}" : layers;
-  return R"({"id":"t","displayName":"T","type":")" + type + R"(","densitometry":"statusM",)" + extra + ls +
+  const std::string m = R"([[1,1.0],[10,0.8]])";
+  const std::string mtf = R"("mtf":{"red":)" + m + R"(,"green":)" + m + R"(,"blue":)" + m + "},";
+  const std::string hal = type == "negative"
+      ? R"("halation":{"baseThicknessMm":0.127,"remjetReflectance":{"on":0.01,"off":0.3},"layerSplit":[1,0.1,0]},)"
+      : "";
+  return R"({"id":"t","displayName":"T","type":")" + type + R"(","densitometry":"statusM",)" + extra + mtf + hal + ls +
          R"(,"dyeDensity":{"cyan":)" + kDye + R"(,"magenta":)" + kDye + R"(,"yellow":)" + kDye + "}}";
 }
 const char* kNegExtra = R"("balanceIlluminantK":3200,"midGreyLogExposure":-1.5,)";
@@ -67,7 +75,7 @@ TEST_CASE("loads 2383-type") {
 TEST_CASE("rejects malformed") {
   CHECK(!loadError("good", stockJson("", kGoodCurve, kNegExtra)).size());  // control: the fixture is valid
   CHECK(loadError("nolayers", R"({"id":"t","displayName":"T","type":"negative","densitometry":"statusM",)"
-                              R"("balanceIlluminantK":3200,"midGreyLogExposure":-1,)"
+                              R"("balanceIlluminantK":3200,"midGreyLogExposure":-1,"mtf":{},)"
                               R"("dyeDensity":{"cyan":[[500,1],[505,1]],"magenta":[[500,1],[505,1]],"yellow":[[500,1],[505,1]]}})")
             .find("layers") != std::string::npos);
   CHECK(loadError("unsorted", stockJson("", "[[-1,0.5],[-2,0.1],[0,1.0]]", kNegExtra))
@@ -113,4 +121,57 @@ TEST_CASE("sensitivities stay zero outside their digitised range") {
   const Stock neg = loadStock(kStocks + "/kodak-5219-type.json");
   CHECK(neg.sensitivity[0][64] == 0.0);  // red layer ends at 680 nm
   CHECK(neg.sensitivity[0][24] == 0.0);  // and starts at 510 nm
+}
+
+namespace {
+void checkMtf(const Stock& s) {
+  for (int i = 0; i < 3; ++i) {
+    const MtfCurve& m = s.mtf[i];
+    REQUIRE(m.size() >= 8);
+    CHECK(m.front()[1] >= 0.9);
+    CHECK(m.front()[1] <= 1.3);
+    for (size_t k = 0; k < m.size(); ++k) {
+      CHECK(m[k][1] > 0.0);
+      if (k > 0) CHECK(m[k][0] > m[k - 1][0]);
+    }
+  }
+}
+}  // namespace
+
+TEST_CASE("5219 carries MTF and halation data") {
+  const Stock s = loadStock(kStocks + "/kodak-5219-type.json");
+  checkMtf(s);
+  REQUIRE(s.halation.has_value());
+  const Halation& h = *s.halation;
+  CHECK(h.baseThicknessMm > 0.05);
+  CHECK(h.baseThicknessMm < 0.3);
+  CHECK(h.reflectanceOff > h.reflectanceOn);
+  CHECK(h.reflectanceOn > 0.0);
+  CHECK(h.layerSplit[0] == 1.0);
+  CHECK(h.layerSplit[0] > h.layerSplit[1]);
+  CHECK(h.layerSplit[1] > h.layerSplit[2]);
+  CHECK(h.layerSplit[2] >= 0.0);
+}
+
+TEST_CASE("2383 carries MTF, no halation") {
+  const Stock s = loadStock(kStocks + "/kodak-2383-type.json");
+  checkMtf(s);
+  CHECK(!s.halation.has_value());
+}
+
+TEST_CASE("malformed MTF is rejected") {
+  std::ifstream in(kStocks + "/kodak-5219-type.json");
+  std::stringstream ss;
+  ss << in.rdbuf();
+  const nlohmann::json good = nlohmann::json::parse(ss.str());
+  CHECK(!loadError("mtfgood", good.dump()).size());  // control
+  nlohmann::json rev = good;
+  std::reverse(rev["mtf"]["green"].begin(), rev["mtf"]["green"].end());
+  CHECK(loadError("mtfrev", rev.dump()).find("mtf") != std::string::npos);
+  nlohmann::json nohal = good;
+  nohal.erase("halation");
+  CHECK(loadError("nohal", nohal.dump()).find("halation") != std::string::npos);
+  nlohmann::json nomtf = good;
+  nomtf.erase("mtf");
+  CHECK(loadError("nomtf", nomtf.dump()).find("mtf") != std::string::npos);
 }

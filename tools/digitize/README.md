@@ -38,7 +38,7 @@ modules from the current directory or the environment.
    Look at every image: the magenta must sit on the printed line, within about one line width.
    Fix and repeat.
 4. **Build the stock.** `python -I tools/digitize/build_stock.py --meta tools/digitize/meta/<id>.json`
-   resamples the points (spectra to 5 nm, characteristic curves to 0.05 log E), validates the result
+   resamples the points (spectra to 5 nm, characteristic curves to 0.05 log E; MTF points are kept as digitised), validates the result
    against `data/stocks/schema.json` and writes `data/stocks/<id>.json`. It prints `valid` on success.
 
 ## Figure config (`figures/<figure>.json`)
@@ -79,3 +79,23 @@ here and not copied into the stock file.
 `build_stock.py` clamps dye and base densities at 0, because Kodak's D-min subtraction leaves tails
 of about -0.04. It also makes characteristic curves non-decreasing, and refuses to build if any dip
 is larger than 0.02 D.
+
+## MTF figures and the halation block
+
+Every stock carries the datasheet's modulation-transfer curves, one per layer, in `mtf` as
+`[cycles/mm, response]` pairs (response as a fraction, 1.0 = 100 %). The figures are
+`figures/7219_mtf.json` (vector, p.3) and `figures/2383_mtf.json` (raster, p.4, hand-read). Both have
+log-log axes (`"log": true` on x and y, 1-600 c/mm by 1-200 %), with columns
+`["cyclesPerMm", "responsePercent"]`. The curves are all drawn black, so the vector figure tells them
+apart by bounding box and the raster one by the R/G/B letters at their ends. `build_stock.py` divides
+by 100, averages repeated frequencies and does not resample.
+
+Camera negatives also carry a `halation` block, which the sharpness/halation model uses:
+
+- `baseThicknessMm`: thickness of the film base the light crosses and returns through.
+- `remjetReflectance {on, off}`: fraction of the red-layer exposure returned to the emulsion with the
+  rem-jet backing present and removed.
+- `layerSplit [r, g, b]`: relative weight of that returned light per layer, red = 1. Not typed in:
+  `build_stock.py` computes `sum(s_c) / sum(s_red)` over 600-700 nm on the linear layer sensitivities.
+- `sources`: where each number comes from. Values nothing published could be found for are marked
+  `ASSUMPTION` with the formula used. Edit them in `meta/<id>.json`.

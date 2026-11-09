@@ -9,6 +9,8 @@ meta gives instead the path of a points CSV (relative to tools/digitize/). This 
   - clamps dye and base densities at 0 (tiny negative tails come from Kodak's D-min subtraction);
   - makes characteristic curves non-decreasing (a real film curve never loses density with more
     exposure; any dip is digitising noise) and refuses to build if a dip is bigger than 0.02 D;
+  - keeps MTF points as digitised (percent -> fraction, repeated frequencies averaged, no resampling);
+  - derives halation.layerSplit from the layer sensitivities (negatives only);
   - validates the result against data/stocks/schema.json and prints "valid".
 """
 import argparse
@@ -64,12 +66,23 @@ def resample_curve(pts, label):
     return [[round(float(g), 2) + 0.0, round(float(a), 4) + 0.0] for g, a in zip(grid, mono)], fix
 
 
+def layer_split(layers):
+    """Relative weight of back-reflected light per layer: sum of linear sensitivity over 600-700 nm,
+    divided by the red layer's. The light that reaches the base is what the upper layers did not
+    absorb, i.e. red."""
+    sums = []
+    for ch in ("red", "green", "blue"):
+        sums.append(sum(10 ** v for nm, v in layers[ch]["logSensitivity"] if 600 <= nm <= 700))
+    split = [float(f"{s / sums[0]:.4g}") for s in sums]
+    return split, f"layerSplit (600-700 nm sensitivity ratio): {split}"
+
+
 def _load(rel):
     return read_points(os.path.join(TOOLS_DIR, rel))
 
 
 def build(meta):
-    out = {k: v for k, v in meta.items() if k not in ("layers", "dyeDensity", "baseDensity", "comment")}
+    out = {k: v for k, v in meta.items() if k not in ("layers", "dyeDensity", "baseDensity", "comment", "mtf", "halation")}
     report = []
     out["layers"] = {}
     for ch in ("red", "green", "blue"):
@@ -88,9 +101,19 @@ def build(meta):
         spec, clamped = resample_spectrum(_load(meta["baseDensity"]), clamp_zero=True)
         out["baseDensity"] = spec
         report.append(f"base density: {spec[0][0]}-{spec[-1][0]} nm, {clamped} samples clamped to 0")
+    out["mtf"] = {}
+    for ch in ("red", "green", "blue"):
+        f, pct = _clean(_load(meta["mtf"][ch]))
+        out["mtf"][ch] = [[round(float(a), 4), round(float(b) / 100.0, 4)] for a, b in zip(f, pct)]
+        report.append(f"{ch} MTF: {len(f)} points, {f[0]:.2f}-{f[-1]:.1f} c/mm")
+    if "halation" in meta:
+        hal = dict(meta["halation"])
+        hal["layerSplit"], note = layer_split(out["layers"])
+        report.append(note)
+        out["halation"] = {k: hal[k] for k in ("baseThicknessMm", "remjetReflectance", "layerSplit", "sources")}
     # Keep the schema's key order so the files diff cleanly.
     order = ["id", "displayName", "type", "densitometry", "sources", "balanceIlluminantK",
-             "midGreyLogExposure", "labAimDensity", "layers", "dyeDensity", "baseDensity", "interlayer"]
+             "midGreyLogExposure", "labAimDensity", "layers", "dyeDensity", "baseDensity", "mtf", "halation", "interlayer"]
     return {k: out[k] for k in order if k in out}, report
 
 

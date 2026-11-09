@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,16 @@ struct Curve {
   double maxLogE() const { return logE.back(); }
 };
 
+// Datasheet sharpness: {cycles/mm, response (1.0 = 100 %)} pairs, frequency ascending.
+using MtfCurve = std::vector<std::array<double, 2>>;
+
+// Inputs for the halation model (camera negatives only).
+struct Halation {
+  double baseThicknessMm = 0;
+  double reflectanceOn = 0, reflectanceOff = 0;  // fraction of red-layer exposure returned, rem-jet on / off
+  Vec3 layerSplit{};                             // r, g, b; r == 1
+};
+
 struct Stock {
   std::string id, displayName;
   StockType type = StockType::Negative;
@@ -33,6 +44,8 @@ struct Stock {
   std::array<Curve, 3> curve;             // same layer order as sensitivity
   std::array<Spectrum, 3> dye{};          // 0 = cyan, 1 = magenta, 2 = yellow
   Spectrum base{};                        // film base density; zeros if absent
+  std::array<MtfCurve, 3> mtf;            // layer order as `curve`
+  std::optional<Halation> halation;       // negatives only
   double balanceIlluminantK = 0, midGreyLogExposure = 0;
   Vec3 labAimDensity{};
 };

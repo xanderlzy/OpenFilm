@@ -9,7 +9,7 @@
       "title": "KODAK VISION Color Print Film 2383 / 3383 data sheet, Publication H-1-2383 (Revised 3-22)",
       "url": "https://www.kodak.com/content/products-brochures/Film/KODAK-VISION-Color-Print-Film-2383-3383-data-sheet.pdf",
       "retrieved": "2026-11-08",
-      "figures": ["Sensitometric Curves (p.4, F002_1254AC)", "Spectral Sensitivity Curves (p.5, F010_0293AC)", "Spectral Dye Density Curves (p.5, F010_0294AC)"]
+      "figures": ["Sensitometric Curves (p.4, F002_1254AC)", "Spectral Sensitivity Curves (p.5, F010_0293AC)", "Spectral Dye Density Curves (p.5, F010_0294AC)", "Modulation-Transfer Function Curves (p.4, F010_0292AC)"]
     },
     {
       "title": "LAD for KODAK VISION Color Print Film, Publication H-61B",
@@ -28,6 +28,11 @@
     "cyan": "points/2383_dye_density_cyan.csv",
     "magenta": "points/2383_dye_density_magenta.csv",
     "yellow": "points/2383_dye_density_yellow.csv"
+  },
+  "mtf": {
+    "red": "points/2383_mtf_red.csv",
+    "green": "points/2383_mtf_green.csv",
+    "blue": "points/2383_mtf_blue.csv"
   },
   "interlayer": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
 }

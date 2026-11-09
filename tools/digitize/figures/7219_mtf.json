@@ -1,0 +1,14 @@
+{
+  "comment": "Kodak VISION3 500T 5219/7219 'Modulation-Transfer Function Curves' (TI2647F), p.3. Vector graph; log-log axes, 1-600 cycles/mm by 1-200 % response. Exposure 3200K tungsten, process ECN-2, Status M. All three curves are drawn in the same near-black solid stroke, so each is told apart by its bounding box: the R line ends highest (about 38 % at 80 c/mm; G about 29 %), B lowest (about 16 %); the R/G/B letters at the line ends confirm this. The curves start at about 2.5 c/mm and end at about 80 c/mm. The x axis is calibrated on the 1 and 100 c/mm gridlines (snapped from their labels), the y axis on the 100 % and 10 % gridlines (y values are percent of response, 100 = unity modulation; the datasheet curves sit slightly above 100 % at mid frequencies because of edge/adjacency enhancement).",
+  "pdf": "7219.pdf",
+  "page": 3,
+  "clip": [340, 330, 575, 480],
+  "columns": ["cyclesPerMm", "responsePercent"],
+  "xAxis": {"v0": 1, "v1": 100, "log": true, "p0": 362.6, "p1": 508.4},
+  "yAxis": {"v0": 100, "v1": 10, "log": true, "p0": 356.8, "p1": 423.3},
+  "curves": {
+    "red":   {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [391.6, 355.0, 501.3, 384.5]},
+    "green": {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [391.6, 354.9, 501.3, 392.2]},
+    "blue":  {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [391.6, 355.5, 501.3, 409.2]}
+  }
+}

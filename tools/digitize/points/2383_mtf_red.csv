@@ -1,0 +1,16 @@
+# 2383_mtf / red: read by eye from the 400 dpi render (pixel coords converted by the axis calibration in figures/2383_mtf.json); hand points
+cyclesPerMm,responsePercent
+2.5408,105.1259
+2.9993,101.8922
+3.9471,98.1429
+4.9619,94.5315
+6.9939,89.9222
+9.9714,85.5377
+13.1224,82.9066
+16.4965,80.8601
+20.1534,78.8641
+27.6054,73.6255
+36.7466,69.1658
+50.3342,63.3723
+63.2765,58.7943
+79.5465,54.8889

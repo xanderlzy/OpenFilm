@@ -134,6 +134,33 @@ Stock loadStock(const std::string& path) {
     }
   }
 
+  const json& mtf = c.field(j, "mtf");
+  for (int i = 0; i < 3; ++i) {
+    const std::string where = std::string("mtf.") + layerNames[i];
+    s.mtf[i] = c.pairs(c.field(mtf, layerNames[i], "mtf."), where);
+    for (const auto& p : s.mtf[i])
+      if (!(p[0] > 0.0) || !(p[1] > 0.0)) c.fail("field '" + where + "' needs frequency > 0 and response > 0");
+  }
+
+  if (s.type == StockType::Negative) {
+    const json& h = c.field(j, "halation");
+    Halation hal;
+    hal.baseThicknessMm = c.num(h, "baseThicknessMm");
+    if (!(hal.baseThicknessMm > 0.0)) c.fail("field 'halation.baseThicknessMm' must be > 0");
+    const json& rr = c.field(h, "remjetReflectance", "halation.");
+    hal.reflectanceOn = c.num(rr, "on");
+    hal.reflectanceOff = c.num(rr, "off");
+    if (!(hal.reflectanceOn >= 0.0 && hal.reflectanceOff <= 1.0 && hal.reflectanceOff >= hal.reflectanceOn))
+      c.fail("field 'halation.remjetReflectance' needs 0 <= on <= off <= 1");
+    const json& ls = c.field(h, "layerSplit", "halation.");
+    if (!ls.is_array() || ls.size() != 3 || !ls[0].is_number() || !ls[1].is_number() || !ls[2].is_number())
+      c.fail("field 'halation.layerSplit' must be an array of 3 numbers");
+    hal.layerSplit = {ls[0].get<double>(), ls[1].get<double>(), ls[2].get<double>()};
+    if (hal.layerSplit[0] != 1.0 || hal.layerSplit[1] < 0.0 || hal.layerSplit[2] < 0.0)
+      c.fail("field 'halation.layerSplit' must start at 1 and be non-negative");
+    s.halation = hal;
+  }
+
   const json& dyes = c.field(j, "dyeDensity");
   const char* dyeNames[3] = {"cyan", "magenta", "yellow"};
   for (int i = 0; i < 3; ++i) {

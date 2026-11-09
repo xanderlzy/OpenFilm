@@ -4,7 +4,7 @@
   "description": "One film stock digitised from its published datasheet. Spectra are sampled at 5 nm inside 380-780 nm (only the digitised range is stored); characteristic curves are sampled every 0.05 log E. Every [x, y] array is sorted ascending by x.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "displayName", "type", "densitometry", "sources", "layers", "dyeDensity", "interlayer"],
+  "required": ["id", "displayName", "type", "densitometry", "sources", "layers", "dyeDensity", "interlayer", "mtf"],
   "properties": {
     "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
     "displayName": { "type": "string", "minLength": 1 },
@@ -62,6 +62,53 @@
       }
     },
     "baseDensity": { "$ref": "#/$defs/spectrum" },
+    "mtf": {
+      "description": "Datasheet modulation-transfer curves per layer: [spatial frequency in cycles/mm, response as a fraction (1.0 = 100 %)] pairs, ascending in frequency. Kept exactly as digitised.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["red", "green", "blue"],
+      "properties": {
+        "red": { "$ref": "#/$defs/mtfCurve" },
+        "green": { "$ref": "#/$defs/mtfCurve" },
+        "blue": { "$ref": "#/$defs/mtfCurve" }
+      }
+    },
+    "halation": {
+      "description": "Inputs for the halation model (camera negatives only): light that passes the emulsion reflects off the back of the base and re-exposes the film.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseThicknessMm", "remjetReflectance", "layerSplit", "sources"],
+      "properties": {
+        "baseThicknessMm": { "type": "number", "exclusiveMinimum": 0 },
+        "remjetReflectance": {
+          "description": "Fraction of the red-layer exposure returned to the emulsion, with the rem-jet backing present (on) and removed (off).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["on", "off"],
+          "properties": {
+            "on": { "type": "number", "minimum": 0, "maximum": 1 },
+            "off": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "layerSplit": {
+          "description": "Relative weight of the returned light in the [red, green, blue] layers; red is 1. Derived from the layer sensitivities over 600-700 nm.",
+          "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number", "minimum": 0 }
+        },
+        "sources": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["title", "note"],
+            "properties": {
+              "title": { "type": "string" },
+              "url": { "type": "string", "pattern": "^https?://" },
+              "note": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
     "interlayer": {
       "description": "3x3 interlayer (inter-image) effect matrix; identity in M2.",
       "type": "array", "minItems": 3, "maxItems": 3,
@@ -70,11 +117,19 @@
   },
   "allOf": [
     { "if": { "properties": { "type": { "const": "negative" } } },
-      "then": { "required": ["balanceIlluminantK", "midGreyLogExposure"] } },
+      "then": { "required": ["balanceIlluminantK", "midGreyLogExposure", "halation"] } },
     { "if": { "properties": { "type": { "const": "print" } } },
       "then": { "required": ["labAimDensity"] } }
   ],
   "$defs": {
+    "mtfCurve": {
+      "description": "[cycles/mm > 0, response fraction > 0] pairs.",
+      "type": "array", "minItems": 2,
+      "items": {
+        "type": "array", "minItems": 2, "maxItems": 2,
+        "prefixItems": [{ "type": "number", "exclusiveMinimum": 0 }, { "type": "number", "exclusiveMinimum": 0 }]
+      }
+    },
     "layer": {
       "type": "object",
       "additionalProperties": false,
