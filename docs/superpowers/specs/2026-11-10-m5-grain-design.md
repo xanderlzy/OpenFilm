@@ -149,3 +149,28 @@ print; the print then adds its own, finer grain.
   half-precision plates; if over budget, fuse negative grain into the print-expose pass.
 - **Full-mode float edges.** Disc edges landing within float rounding of a pixel boundary can differ
   CPU vs GPU; hence the 99.9 % bar plus a statistical bar.
+
+## Refinements from planning
+
+Recorded when the plan was written; they make the decisions above precise without changing them.
+
+- **Granularity axis.** The datasheet graphs plot granularity against *relative* log exposure beside
+  the figure's own density curves, and tell the reader to go through those curves to find the
+  granularity at a density. The digitiser does exactly that, so `granularity` is stored per layer
+  as `[[density, sigmaD]...]` (not on the plot's x axis), and the stock's absolute characteristic
+  curve is not involved.
+- **What grains.** The model acts on the density above the layer's minimum (`D − D-min`, D-min =
+  the layer curve's lowest density): base, mask and fog do not grain.
+- **Size** multiplies the cloud radius and rescales the deviation by the analytic factor that keeps
+  the 48 µm rms unchanged (rather than changing the per-cloud density, which must stay above the
+  layer's density range).
+- **Coherent plates.** All density levels of one layer's plates share one cloud realisation (per-cell
+  Poisson counts by inverse CDF of the same random number, cloud positions fixed per cell), so a
+  level's clouds are a subset of the next level's. Blending two levels then keeps the strength;
+  independent plates would lose up to 30 % between levels. Plates tile seamlessly (cells wrap at
+  the plate edge).
+- **Sub-pixel clouds.** When a cloud radius is below 0.25 px (e.g. HD on Super 35), both modes draw
+  each pixel's deviation from a Gaussian with the model's exact pixel-area variance, since the
+  texture is then finer than a pixel and simulating each cloud would cost too much.
+- **Cloud radius source.** If no published dye-cloud measurement can be found, the value is an
+  assumption, marked as such in `sources` (as M4's rem-jet reflectance was).
