@@ -71,7 +71,8 @@ DI code ─[lutE 3D]→ log10(E+eps) ─(× 2^Exposure)→ log E ─[3 neg curve
   table's size and domain min/max.
 - **`MetalRenderer`** — `render(…, const GpuFilm&, gain, offsets)`. A **`GpuFilm`** holds the
   tables as `MTLBuffer`s, uploaded once per bake; it is created lazily the first time a bake is used
-  on the GPU and lives as long as the `BakedFilm` it came from (kept in the cache entry), so
+  on the GPU and is dropped once the `BakedFilm` it came from is gone (the renderer keys its
+  buffers by device and a `weak_ptr` to the bake, so `src/core` never depends on Metal), so
   frames reuse it. Encoding stays thread-safe; Resolve may render frames concurrently.
 
 ### OFX (`src/ofx/openfilm_plugin.cpp`)
@@ -88,7 +89,7 @@ DI code ─[lutE 3D]→ log10(E+eps) ─(× 2^Exposure)→ log E ─[3 neg curve
 
 | Test | Pass bar |
 |---|---|
-| Split bake vs direct model (`FilmModel::evaluate`), 2000 random DI codes × exposure −4…+4 stops × printer points −12…+12 | ≤ 0.4 ΔE2000, same metric and sample scheme as M2's LUT test |
+| Split bake vs direct model (`FilmModel::evaluate`), 2000 random DI codes × exposure −5…+5 stops × printer points and Print Density −20…+20 (the controls' ranges), plus M2's deep-shadow test | max ΔE2000 < 0.5, the bar M2's LUT tests use |
 | Printer lights: offsets applied per pixel equal the old baked-in result | within the same tolerance; R +5 still shifts toward cyan |
 | Cache: changing points or Print Density never re-bakes | bake count unchanged |
 | GPU vs CPU (`test_gpu`): grey ramp, saturated primaries, ±8 stops, points ±20, NaN/inf/negative pixels, a window smaller than the image, odd widths, rowBytes padding | max abs difference ≤ 1e-3 code value per channel; alpha bit-exact |
