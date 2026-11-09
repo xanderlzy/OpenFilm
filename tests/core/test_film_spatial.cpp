@@ -108,7 +108,6 @@ void runStages(const ConstImageView& src, const ImageView& dst, const RenderWind
   printExposeStage(img, f);
   printSharpness(img, f.optics, s);
   printDevelopStage(img, f, printOffsetsLogE(f.balance, look));
-  printEdgeEffect(img, f.optics, s);
   finishStage(img, rect, f, dst, win);
 }
 
@@ -313,26 +312,49 @@ TEST_CASE("edge effect keeps mean density") {
       for (int c = 0; c < 3; ++c) d.at(x, y)[c] = u(rng);
   SpatialControls s = allOff();
   s.sharpness = true;
-  s.pxPerMm = 30;  // the widest edge kernel (print, sigma 0.5 mm = 15 px) then reaches < 64 px
+  s.pxPerMm = 30;  // the negative edge kernel (sigma <= 0.5 mm = 15 px) then reaches < 64 px
   auto mean = [&](const Image4f& img, int c) {
     double sum = 0;
     for (int y = 0; y < n; ++y)
       for (int x = 0; x < n; ++x) sum += img.at(x, y)[c];
     return sum / (double(n) * n);
   };
-  Image4f neg = d, print = d;
+  Image4f neg = d;
   edgeEffect(neg, film().optics, s);
-  printEdgeEffect(print, film().optics, s);
-  for (int c = 0; c < 3; ++c) {
-    CHECK(std::abs(mean(neg, c) - mean(d, c)) <= 1e-4);
-    CHECK(std::abs(mean(print, c) - mean(d, c)) <= 1e-4);
-  }
+  for (int c = 0; c < 3; ++c) CHECK(std::abs(mean(neg, c) - mean(d, c)) <= 1e-4);
   CHECK(neg.px != d.px);  // it did something
-  CHECK(print.px != d.px);
   Image4f none = d;
   edgeEffect(none, film().optics, allOff());
-  printEdgeEffect(none, film().optics, allOff());
   CHECK(none.px == d.px);
+}
+
+// Ruling R14: sharpness must not tint edges. A neutral step keeps its colour away from the edge:
+// beyond 10 px, sharpness changes red, green and blue by the same amount (within 0.01 display code)
+// relative to the all-off render. The old print edge effect (sigma ~0.5 mm, gain up to 0.3) failed this
+// with a wide green-tinted halo.
+TEST_CASE("sharpness does not tint a neutral edge") {
+  const int w = 2048, h = 32, edge = w / 2;
+  TestImage src(tight(0, 0, w, h), 1.f);
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) src.at(x, y)[0] = src.at(x, y)[1] = src.at(x, y)[2] = x < edge ? 0.25f : 0.6f;
+  SpatialControls on = allOff();
+  on.sharpness = true;
+  on.pxPerMm = 3840 / 24.89;  // UHD Super 35
+  TestImage a(tight(0, 0, w, h), 0.f), b(tight(0, 0, w, h), 0.f);
+  renderFilm(src.cview(), a.view(), {0, 0, w, h}, film(), LookControls{}, on);
+  renderFilm(src.cview(), b.view(), {0, 0, w, h}, film(), LookControls{}, allOff());
+  double worst = 0;
+  int worstX = 0;
+  const int y = h / 2;
+  for (int x = 0; x < w; ++x) {
+    if (std::abs(x - edge) <= 10) continue;
+    double d[3];
+    for (int c = 0; c < 3; ++c) d[c] = double(a.at(x, y)[c]) - double(b.at(x, y)[c]);
+    const double t = std::max(std::abs(d[1] - d[0]), std::abs(d[2] - d[0]));
+    if (t > worst) { worst = t; worstX = x; }
+  }
+  MESSAGE("neutral step: worst |dG - dR|, |dB - dR| beyond 10 px " << worst << " at " << worstX - edge << " px from the edge");
+  CHECK(worst <= 0.01);
 }
 
 TEST_CASE("format scaling") {

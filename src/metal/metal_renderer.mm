@@ -600,10 +600,7 @@ void planStages(SpatialPlan& plan, const FilmOptics& optics, const SpatialContro
         const LayerPasses lp = layerPasses(optics.print, s.pxPerMm);
         stages.push_back({"print scatter", lp.passes, lp.weights, OF_COMBINE_STORE, {0, 0, 0}, 3});
     }
-    post(OF_POST_DEVELOP_PRINT);
-    if (s.sharpness)
-        stages.push_back({"print edge", edgeLobe(optics.print, s.pxPerMm), {{1.f, 1.f, 1.f}}, OF_COMBINE_EDGE,
-                          edgeGains(optics.print), 3});
+    post(OF_POST_DEVELOP_PRINT);  // no print edge effect (ruling R14): print density goes straight to finish
     post(OF_POST_FINISH);
     int img = kFull0, other = kFull1;
     for (const Stage& st : stages) {

@@ -52,10 +52,15 @@ TEST_CASE("fit matches the 5219 datasheet") {
   for (int c = 0; c < 3; ++c) checkFit(neg.mtf[size_t(c)], true, 2, 0.05, names[c]);
 }
 
+// The print is scatter-only (3 lobes, no edge term), so its response never exceeds 1. The worst
+// points of every layer are at 2.54 c/mm, where the hand-read 2383 curves sit 5-6 % above 100 %; a
+// scatter-only print (response <= 1) cannot reach them, and a 400-start check confirms the
+// least-squares optimum (worst R 0.065, G 0.075, B 0.072). Hence 0.08 for the print, 0.05 for 5219.
+// The user chose this over a print edge effect that tinted edges (rulings R14, R15).
 TEST_CASE("fit matches the 2383 datasheet") {
   const Stock& print = res()->stock("kodak-2383-type");
   const char* names[3] = {"2383 red", "2383 green", "2383 blue"};
-  for (int c = 0; c < 3; ++c) checkFit(print.mtf[size_t(c)], true, 3, 0.05, names[c]);
+  for (int c = 0; c < 3; ++c) checkFit(print.mtf[size_t(c)], false, 3, 0.08, names[c]);
 }
 
 TEST_CASE("fit is deterministic") {
@@ -71,7 +76,7 @@ TEST_CASE("fit is deterministic") {
   const Stock& neg = res()->stock("kodak-5219-type");
   same(fitSharpness(neg.mtf[1], true), fitSharpness(neg.mtf[1], true));
   const Stock& print = res()->stock("kodak-2383-type");
-  same(fitSharpness(print.mtf[2], true, 3), fitSharpness(print.mtf[2], true, 3));
+  same(fitSharpness(print.mtf[2], false, 3), fitSharpness(print.mtf[2], false, 3));
 }
 
 TEST_CASE("gaussian mtf") {
@@ -121,5 +126,5 @@ TEST_CASE("bake carries optics") {
   CHECK(film->optics.negative[0].scatter.size() == 2);
   CHECK(film->optics.print[0].scatter.size() == 3);
   CHECK(film->optics.halation.baseThicknessMm == 0.127);
-  for (int c = 0; c < 3; ++c) CHECK(film->optics.print[size_t(c)].edgeK >= 0);
+  for (int c = 0; c < 3; ++c) CHECK(film->optics.print[size_t(c)].edgeK == 0);  // scatter-only print (R14)
 }

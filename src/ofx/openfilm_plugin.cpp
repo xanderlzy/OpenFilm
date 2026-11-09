@@ -441,7 +441,7 @@ void OpenFilmFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::C
     doubleParam(kParamGateWidth, "Gate width (mm)", "Used when Format is Custom", 24.89, 5.0, 80.0, 5.0, 80.0, 0.1, fmt);
 
     OFX::GroupParamDescriptor* sh = group(kParamSharpnessGroup, "Sharpness");
-    boolParam(kParamSharpnessEnable, "Enable", "Emulsion scatter and development edge effects, negative and print, fitted to the datasheets", true, sh);
+    boolParam(kParamSharpnessEnable, "Enable", "Emulsion scatter in the negative and the print, plus the negative's development edge effect, fitted to the datasheets", true, sh);
 
     OFX::GroupParamDescriptor* ha = group(kParamHalationGroup, "Halation");
     boolParam(kParamHalationEnable, "Enable", "Light reflected from the film base back into the red layer", true, ha);

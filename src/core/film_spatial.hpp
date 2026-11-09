@@ -1,5 +1,6 @@
 // The film's spatial behaviour on the CPU: bloom, per-layer scatter and halation on the exposure,
-// the development edge effect on the negative density, scatter and edge effect on the print. The
+// the development edge effect on the negative density, scatter on the print (no print edge effect:
+// ruling R14). The
 // M3 colour chain is split into stages so each effect acts in the domain where it happens. This is
 // the reference the Metal path mirrors pass for pass.
 #pragma once
@@ -11,7 +12,7 @@
 namespace openfilm {
 
 struct SpatialControls {
-  bool sharpness = true;  // scatter + edge effect, negative and print
+  bool sharpness = true;  // scatter on negative and print, edge effect on the negative
   bool halation = true;
   bool remjet = true;
   double halationStrength = 1;  // 0..5, 1 = physical
@@ -79,8 +80,6 @@ void printExposeStage(Image4f& DtoP, const BakedFilm& film);
 void printSharpness(Image4f& P, const FilmOptics& optics, const SpatialControls& s);
 // P -> print density: printCurves(log10(max(P, 1e-30)) + offsets).
 void printDevelopStage(Image4f& PtoDp, const BakedFilm& film, const Vec3& offsets);
-// Print edge effect (if sharpness), in print density, with optics.print[c].edgeK / edgeSigmaMm.
-void printEdgeEffect(Image4f& Dp, const FilmOptics& optics, const SpatialControls& s);
 // Print density -> lutD -> 10^q -> display matrix -> encode; writes only window pixels. Window pixels
 // outside the work rect (i.e. outside the source) become (0,0,0,0).
 void finishStage(const Image4f& Dp, const WorkRect& rect, const BakedFilm& film, const ImageView& dst,

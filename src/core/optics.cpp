@@ -174,7 +174,7 @@ FilmOptics makeOptics(const Stock& negative, const Stock& print) {
   FilmOptics o;
   for (size_t c = 0; c < 3; ++c) {
     o.negative[c] = fitSharpness(negative.mtf[c], true);
-    o.print[c] = fitSharpness(print.mtf[c], true, 3);
+    o.print[c] = fitSharpness(print.mtf[c], false, 3);  // scatter only (ruling R14)
   }
   o.halation = *negative.halation;
   return o;

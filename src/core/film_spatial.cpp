@@ -145,7 +145,6 @@ int spatialMarginPx(const FilmOptics& optics, const SpatialControls& controls) {
   if (s.sharpness) {
     m += spreadReachPx(edgeLobe(optics.negative, s.pxPerMm));
     m += layerReach(layerPasses(optics.print, s.pxPerMm));
-    m += spreadReachPx(edgeLobe(optics.print, s.pxPerMm));
   }
   return int(std::min(m, 1LL << 28));
 }
@@ -237,11 +236,6 @@ void printDevelopStage(Image4f& PtoDp, const BakedFilm& film, const Vec3& offset
   });
 }
 
-void printEdgeEffect(Image4f& Dp, const FilmOptics& optics, const SpatialControls& controls) {
-  const SpatialControls s = sanitize(controls);
-  if (s.sharpness) unsharpDensity(Dp, optics.print, s.pxPerMm);
-}
-
 void finishStage(const Image4f& Dp, const WorkRect& rect, const BakedFilm& film, const ImageView& dst,
                  const RenderWindow& win) {
   parallelRows(win.y2 - win.y1, [&](int r0, int r1) {
@@ -281,7 +275,6 @@ void renderFilm(const ConstImageView& src, const ImageView& dst, const RenderWin
   printExposeStage(img, film);
   printSharpness(img, film.optics, s);
   printDevelopStage(img, film, printOffsetsLogE(film.balance, look));
-  printEdgeEffect(img, film.optics, s);
   finishStage(img, rect, film, dst, win);
 }
 

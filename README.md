@@ -16,7 +16,7 @@ pipeline with halation, bloom and grain, built from published film-stock datashe
   stock, exposure, printer lights and print density.
 * **Film format:** Super 35, Academy, Super 16, 16mm, 65mm or Custom (with a gate width in mm). All
   spatial effects are sized in millimetres on the film, so the format changes their scale.
-* **Sharpness:** one switch for the emulsion scatter and edge effects of the negative and the print.
+* **Sharpness:** one switch for the emulsion scatter of the negative and the print (the print is scatter-only) and the negative's development edge effect.
 * **Halation:** on/off, Rem-jet (on = faint halo, off = strong red glow), Strength (1 = physical) and
   Radius (multiplier).
 * **Bloom:** on/off (off by default), Amount and Radius (mm).

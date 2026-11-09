@@ -1,5 +1,5 @@
-// Film optics in millimetres on the film plane: per-layer sharpness (light scatter in the emulsion
-// plus the development edge effect) fitted to the datasheet MTF curves, the halation and bloom
+// Film optics in millimetres on the film plane: per-layer sharpness (light scatter in the emulsion,
+// plus the development edge effect on the negative) fitted to the datasheet MTF curves, the halation and bloom
 // lobes, and the gate widths that turn millimetres into pixels.
 #pragma once
 
@@ -37,7 +37,9 @@ LayerSharpness fitSharpness(const MtfCurve& mtf, bool withEdgeEffect, int scatte
 
 struct FilmOptics {
   std::array<LayerSharpness, 3> negative;  // 2 scatter lobes + edge effect
-  std::array<LayerSharpness, 3> print;     // 3 scatter lobes + edge effect, edge applied in print density
+  // 3 scatter lobes, no edge term (edgeK == 0). Ruling R14: the fitted print edge effect (sigma ~0.5 mm)
+  // tinted every mid-contrast edge with a wide green halo, so the print is scatter-only.
+  std::array<LayerSharpness, 3> print;
   Halation halation;                       // from the negative stock
 };
 
