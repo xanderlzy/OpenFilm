@@ -174,3 +174,21 @@ Recorded when the plan was written; they make the decisions above precise withou
   texture is then finer than a pixel and simulating each cloud would cost too much.
 - **Cloud radius source.** If no published dye-cloud measurement can be found, the value is an
   assumption, marked as such in `sources` (as M4's rem-jet reflectance was).
+
+## Amendment during build (R3): additive dye clouds
+
+Task 2 showed the saturating Boolean model above cannot match the datasheet at a physical cloud
+size (it gives 5–13× the datasheet rms, and cannot show the grain the datasheet measures at D-min).
+Dye densities add where clouds overlap, so the model is **additive** instead:
+
+- Each layer's grain is `a(D) · (N − μ)`, averaged over the pixel: N = number of dye clouds
+  covering a point (Poisson discs of the stock's cloud radius × Size), μ = 4 mean overlaps
+  (an assumption; the datasheet cannot pin it). Mean density is preserved exactly.
+- `a(D)` is set so the 48 µm rms equals the datasheet curve at the pixel's absolute density,
+  interpolated between digitised points and held at the ends — the strength matches the datasheet
+  by construction; the measured-grain bar (15 %) still tests the whole simulation.
+- Texture (cloud size, overlap) is the same at every density of a layer; only strength varies.
+- Preview needs one plate per stage and layer (≈ 50 MB per set) instead of 12 density levels;
+  `Preview = a(D) × plate`. The fit bar becomes "within 1 % at every digitised point".
+- Supersedes "Grain model", "Fitting", the plate-level parts of "Preview mode", and the refinements
+  "What grains", "Size" and "Coherent plates".
