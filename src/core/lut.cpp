@@ -1,7 +1,9 @@
 #include "core/lut.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <future>
 #include <thread>
 
 namespace openfilm {
@@ -198,6 +200,22 @@ std::shared_ptr<const BakedFilm> FilmCache::get(const FilmParams& params) {
                    entries_.end());
   }
   return future.get();
+}
+
+std::shared_ptr<const BakedFilm> FilmCache::peek(const FilmParams& params) {
+  const uint64_t key = params.hash();
+  Future future;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& e : entries_)
+      if (e.first == key) { future = e.second; break; }
+  }
+  if (!future.valid() || future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return nullptr;
+  try {
+    return future.get();
+  } catch (...) {
+    return nullptr;
+  }
 }
 
 }  // namespace openfilm

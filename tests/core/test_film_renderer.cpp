@@ -352,3 +352,12 @@ TEST_CASE("a failed bake reaches the caller and is not cached") {
   CHECK_THROWS(c.get(bad));  // retried, not a remembered failure
   CHECK(c.get(params()) != nullptr);  // the cache still works afterwards
 }
+
+TEST_CASE("FilmCache::peek never bakes and returns a finished look") {
+  FilmCache c(res());
+  const FilmParams p = params();
+  CHECK(c.peek(p) == nullptr);  // not requested: no bake started
+  CHECK(c.peek(p) == nullptr);
+  const auto baked = c.get(p);
+  CHECK(c.peek(p) == baked);
+}

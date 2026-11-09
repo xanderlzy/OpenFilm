@@ -86,6 +86,9 @@ class FilmCache {
  public:
   explicit FilmCache(std::shared_ptr<const FilmResources> resources);
   std::shared_ptr<const BakedFilm> get(const FilmParams& params);
+  // The baked look if it is already finished (or null: not requested, still baking or failed).
+  // Never starts or waits for a bake.
+  std::shared_ptr<const BakedFilm> peek(const FilmParams& params);
 
  private:
   std::shared_ptr<const FilmResources> res_;

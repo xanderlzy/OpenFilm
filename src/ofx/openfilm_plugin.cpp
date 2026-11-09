@@ -15,12 +15,16 @@
 #include "ofxsImageEffect.h"
 
 #include "core/film_renderer.hpp"
+#include "core/film_spatial.hpp"
+#include "core/optics.hpp"
 #include "core/lut.hpp"
 #include "metal/metal_renderer.h"
 
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <exception>
 #include <stdexcept>
 #include <memory>
@@ -42,6 +46,20 @@ constexpr const char* kParamPrintGroup = "print";
 constexpr const char* kParamPrintStock = "printStock";
 constexpr const char* kParamPrinterLight[3] = {"printerLightR", "printerLightG", "printerLightB"};
 constexpr const char* kParamPrintDensity = "printDensity";
+constexpr const char* kParamFormatGroup = "formatGroup";
+constexpr const char* kParamFilmFormat = "filmFormat";
+constexpr const char* kParamGateWidth = "gateWidth";
+constexpr const char* kParamSharpnessGroup = "sharpnessGroup";
+constexpr const char* kParamSharpnessEnable = "sharpnessEnable";
+constexpr const char* kParamHalationGroup = "halationGroup";
+constexpr const char* kParamHalationEnable = "halationEnable";
+constexpr const char* kParamHalationRemjet = "halationRemjet";
+constexpr const char* kParamHalationStrength = "halationStrength";
+constexpr const char* kParamHalationRadius = "halationRadius";
+constexpr const char* kParamBloomGroup = "bloomGroup";
+constexpr const char* kParamBloomEnable = "bloomEnable";
+constexpr const char* kParamBloomAmount = "bloomAmount";
+constexpr const char* kParamBloomRadius = "bloomRadius";
 
 // Path of this bundle's Resources folder, found from where the plugin binary was loaded:
 // .../OpenFilm.ofx.bundle/Contents/MacOS/OpenFilm.ofx -> .../OpenFilm.ofx.bundle/Contents/Resources
@@ -108,6 +126,56 @@ public:
         printStock_ = fetchChoiceParam(kParamPrintStock);
         for (int i = 0; i < 3; ++i) printerLight_[i] = fetchDoubleParam(kParamPrinterLight[i]);
         printDensity_ = fetchDoubleParam(kParamPrintDensity);
+        filmFormat_ = fetchChoiceParam(kParamFilmFormat);
+        gateWidth_ = fetchDoubleParam(kParamGateWidth);
+        sharpness_ = fetchBooleanParam(kParamSharpnessEnable);
+        halation_ = fetchBooleanParam(kParamHalationEnable);
+        remjet_ = fetchBooleanParam(kParamHalationRemjet);
+        halationStrength_ = fetchDoubleParam(kParamHalationStrength);
+        halationRadius_ = fetchDoubleParam(kParamHalationRadius);
+        bloom_ = fetchBooleanParam(kParamBloomEnable);
+        bloomAmount_ = fetchDoubleParam(kParamBloomAmount);
+        bloomRadius_ = fetchDoubleParam(kParamBloomRadius);
+        updateGateEnabled();
+    }
+
+    // The gate width only means something for the Custom format.
+    void changedParam(const OFX::InstanceChangedArgs& /*args*/, const std::string& paramName) override {
+        if (paramName == kParamFilmFormat) updateGateEnabled();
+    }
+
+    // Asks the host for just the part of the source the effects read: the render window grown by the
+    // spatial margin (plus 32 px for the work-rect snap), cut to the source. Anything that goes
+    // wrong falls back to the host's default (the window itself); render() edge-clamps whatever
+    // source it is given, so a missing margin can never break a frame.
+    void getRegionsOfInterest(const OFX::RegionsOfInterestArguments& args, OFX::RegionOfInterestSetter& rois) override {
+        try {
+            logRoiOnce(args.renderScale.x);
+            const OfxRectD rod = srcClip_->getRegionOfDefinition(args.time);
+            OfxRectD roi = args.regionOfInterest;
+            const double scale = args.renderScale.x > 0 ? args.renderScale.x : 1.0;
+            const openfilm::SpatialControls sp = readSpatial(args.time, args.renderScale.x);
+            if (sp.anyOn()) {
+                const LoadedFilm& film = loadedFilm();
+                std::shared_ptr<const openfilm::BakedFilm> baked;
+                if (film.cache) {
+                    openfilm::FilmParams fp;
+                    openfilm::LookControls unused;
+                    readLook(args.time, film, fp, unused);
+                    baked = film.cache->peek(fp);  // never starts a bake
+                }
+                if (baked) {
+                    const double grow = std::ceil((openfilm::spatialMarginPx(baked->optics, sp) + 32) / scale);
+                    roi.x1 -= grow; roi.y1 -= grow; roi.x2 += grow; roi.y2 += grow;
+                } else {
+                    roi = rod;  // bake not ready: ask for everything
+                }
+            }
+            roi.x1 = std::max(roi.x1, rod.x1); roi.y1 = std::max(roi.y1, rod.y1);
+            roi.x2 = std::min(roi.x2, rod.x2); roi.y2 = std::min(roi.y2, rod.y2);
+            if (roi.x2 > roi.x1 && roi.y2 > roi.y1) rois.setRegionOfInterest(*srcClip_, roi);
+        } catch (...) {
+        }
     }
 
     void render(const OFX::RenderArguments& args) override {
@@ -127,7 +195,8 @@ public:
         }
         openfilm::FilmParams fp;
         openfilm::LookControls controls;  // applied per pixel, never rebaked
-        readLook(args, film, fp, controls);
+        readLook(args.time, film, fp, controls);
+        const openfilm::SpatialControls spatial = readSpatial(args.time, args.renderScale.x);
         std::shared_ptr<const openfilm::BakedFilm> baked;
         try {
             baked = film.cache->get(fp);  // re-bakes (~1.4 s) only when the look changed
@@ -144,7 +213,7 @@ public:
                 OFX::throwSuiteStatusException(kOfxStatFailed);
             }
             if (!gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win, baked,
-                            controls)) {
+                            controls, spatial)) {
                 showError("OpenFilm: GPU render failed");
                 OFX::throwSuiteStatusException(kOfxStatFailed);
             }
@@ -153,9 +222,9 @@ public:
         }
 
         try {
-            openfilm::renderFilmCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
-                                    openfilm::ImageView{static_cast<float*>(dst->getPixelData()), dstGeom}, win,
-                                    *baked, controls);
+            openfilm::renderFilm(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
+                                 openfilm::ImageView{static_cast<float*>(dst->getPixelData()), dstGeom}, win, *baked,
+                                 controls, spatial);
         } catch (const std::exception& e) {
             showError(std::string("OpenFilm: render failed: ") + e.what());
             OFX::throwSuiteStatusException(kOfxStatFailed);
@@ -165,22 +234,59 @@ public:
 
 private:
     // The single place the controls are read, so the CPU and GPU paths can never disagree.
-    void readLook(const OFX::RenderArguments& args, const LoadedFilm& film, openfilm::FilmParams& fp,
-                  openfilm::LookControls& controls) {
+    void readLook(double time, const LoadedFilm& film, openfilm::FilmParams& fp, openfilm::LookControls& controls) {
         // Choice entries are listed by display name; the model wants stock ids.
         const auto pick = [&](const std::vector<const openfilm::Stock*>& list, OFX::ChoiceParam* p) {
             int i = 0;
-            p->getValueAtTime(args.time, i);
+            p->getValueAtTime(time, i);
             return list[size_t(std::clamp(i, 0, int(list.size()) - 1))]->id;
         };
         fp.negativeId = pick(film.negatives, negativeStock_);
         fp.printId = pick(film.prints, printStock_);
         // A NaN/inf keyframe would poison the bake (and the whole image): use the default 0.5.
-        const double gc = gamutCompression_->getValueAtTime(args.time);
+        const double gc = gamutCompression_->getValueAtTime(time);
         fp.gamutCompression = std::isfinite(gc) ? gc : 0.5;
-        controls.exposureStops = exposure_->getValueAtTime(args.time);
-        for (int i = 0; i < 3; ++i) controls.printerPoints[size_t(i)] = printerLight_[i]->getValueAtTime(args.time);
-        controls.printDensity = printDensity_->getValueAtTime(args.time);
+        controls.exposureStops = exposure_->getValueAtTime(time);
+        for (int i = 0; i < 3; ++i) controls.printerPoints[size_t(i)] = printerLight_[i]->getValueAtTime(time);
+        controls.printDensity = printDensity_->getValueAtTime(time);
+    }
+
+    // The spatial controls. Image width is the source's region of definition (canonical coords) times
+    // the render scale, so proxy renders keep the same look in millimetres.
+    openfilm::SpatialControls readSpatial(double time, double renderScale) {
+        openfilm::SpatialControls s;
+        int fmt = 0;
+        filmFormat_->getValueAtTime(time, fmt);
+        const double gate = openfilm::gateWidthMm(openfilm::FilmFormat(std::clamp(fmt, 0, 5)),
+                                                  gateWidth_->getValueAtTime(time));
+        const OfxRectD rod = srcClip_->getRegionOfDefinition(time);
+        s.pxPerMm = openfilm::pixelsPerMm((rod.x2 - rod.x1) * renderScale, gate);
+        s.sharpness = sharpness_->getValueAtTime(time);
+        s.halation = halation_->getValueAtTime(time);
+        s.remjet = remjet_->getValueAtTime(time);
+        s.halationStrength = halationStrength_->getValueAtTime(time);
+        s.halationRadius = halationRadius_->getValueAtTime(time);
+        s.bloom = bloom_->getValueAtTime(time);
+        s.bloomAmount = bloomAmount_->getValueAtTime(time);
+        s.bloomRadiusMm = bloomRadius_->getValueAtTime(time);
+        return openfilm::sanitize(s);
+    }
+
+    void updateGateEnabled() noexcept {
+        try {
+            int fmt = 0;
+            filmFormat_->getValue(fmt);
+            gateWidth_->setEnabled(openfilm::FilmFormat(std::clamp(fmt, 0, 5)) == openfilm::FilmFormat::Custom);
+        } catch (...) {
+        }
+    }
+
+    // One line per session in stderr (Resolve keeps plugin stderr in its logs): did the host ask
+    // for regions of interest, and at what render scale.
+    static void logRoiOnce(double renderScale) noexcept {
+        static std::atomic<bool> done{false};
+        if (done.exchange(true)) return;
+        std::fprintf(stderr, "OpenFilm: host called getRegionsOfInterest, render scale %g\n", renderScale);
     }
 
     // Resolve does not implement the OFX message suite's persistent messages; the Support library
@@ -207,6 +313,16 @@ private:
     OFX::ChoiceParam* printStock_ = nullptr;
     OFX::DoubleParam* printerLight_[3] = {};
     OFX::DoubleParam* printDensity_ = nullptr;
+    OFX::ChoiceParam* filmFormat_ = nullptr;
+    OFX::DoubleParam* gateWidth_ = nullptr;
+    OFX::BooleanParam* sharpness_ = nullptr;
+    OFX::BooleanParam* halation_ = nullptr;
+    OFX::BooleanParam* remjet_ = nullptr;
+    OFX::DoubleParam* halationStrength_ = nullptr;
+    OFX::DoubleParam* halationRadius_ = nullptr;
+    OFX::BooleanParam* bloom_ = nullptr;
+    OFX::DoubleParam* bloomAmount_ = nullptr;
+    OFX::DoubleParam* bloomRadius_ = nullptr;
 };
 
 }  // namespace
@@ -299,6 +415,44 @@ void OpenFilmFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::C
     doubleParam(kParamPrintDensity, "Print density",
                 "Printer points added to all three lights; more light = denser, darker print", 0.0, -20.0, 20.0, -20.0, 20.0,
                 1.0, print);
+
+    const auto group = [&](const char* name, const char* label) {
+        OFX::GroupParamDescriptor* g = desc.defineGroupParam(name);
+        g->setLabel(label);
+        g->setOpen(true);
+        return g;
+    };
+    const auto boolParam = [&](const char* name, const char* label, const char* hint, bool def, OFX::GroupParamDescriptor* g) {
+        OFX::BooleanParamDescriptor* b = desc.defineBooleanParam(name);
+        b->setLabel(label);
+        b->setHint(hint);
+        b->setDefault(def);
+        b->setParent(*g);
+    };
+    OFX::GroupParamDescriptor* fmt = group(kParamFormatGroup, "Film format");
+    OFX::ChoiceParamDescriptor* f = desc.defineChoiceParam(kParamFilmFormat);
+    f->setLabel("Format");
+    f->setHint("Gate width of the film the image is mapped onto; sets the size of halation, bloom and sharpness");
+    for (const char* o : {"Super 35 (24.89 mm)", "35mm Academy (21.95 mm)", "Super 16 (12.52 mm)", "16mm (10.26 mm)",
+                          "65mm 5-perf (52.48 mm)", "Custom"})
+        f->appendOption(o);
+    f->setDefault(0);
+    f->setParent(*fmt);
+    doubleParam(kParamGateWidth, "Gate width (mm)", "Used when Format is Custom", 24.89, 5.0, 80.0, 5.0, 80.0, 0.1, fmt);
+
+    OFX::GroupParamDescriptor* sh = group(kParamSharpnessGroup, "Sharpness");
+    boolParam(kParamSharpnessEnable, "Enable", "Emulsion scatter and development edge effects, negative and print, fitted to the datasheets", true, sh);
+
+    OFX::GroupParamDescriptor* ha = group(kParamHalationGroup, "Halation");
+    boolParam(kParamHalationEnable, "Enable", "Light reflected from the film base back into the red layer", true, ha);
+    boolParam(kParamHalationRemjet, "Rem-jet", "On: the stock's anti-halation backing (faint halo). Off: strong red glow", true, ha);
+    doubleParam(kParamHalationStrength, "Strength", "1 = physical", 1.0, 0.0, 5.0, 0.0, 5.0, 0.05, ha);
+    doubleParam(kParamHalationRadius, "Radius", "Multiplier on the physical radius", 1.0, 0.25, 4.0, 0.25, 4.0, 0.05, ha);
+
+    OFX::GroupParamDescriptor* bl = group(kParamBloomGroup, "Bloom");
+    boolParam(kParamBloomEnable, "Enable", "In-camera diffusion (lens / diffusion filter) before the negative", false, bl);
+    doubleParam(kParamBloomAmount, "Amount", "Share of the light that is diffused", 0.25, 0.0, 1.0, 0.0, 1.0, 0.01, bl);
+    doubleParam(kParamBloomRadius, "Radius (mm)", "Diffusion radius on the film", 0.5, 0.05, 5.0, 0.05, 5.0, 0.05, bl);
 }
 
 OFX::ImageEffect* OpenFilmFactory::createInstance(OfxImageEffectHandle handle, OFX::ContextEnum /*context*/) {

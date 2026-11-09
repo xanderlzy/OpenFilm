@@ -1,6 +1,6 @@
 # How OpenFilm's colour model works
 
-This page describes what OpenFilm (Milestone 3) actually does to your picture, in film terms. It is
+This page describes what OpenFilm (Milestone 4) actually does to your picture, in film terms. It is
 written for colorists; no code reading needed. Everything here is the current build, including
 its shortcuts (see "Known approximations").
 
@@ -62,11 +62,68 @@ projector → screen.**
 | Print | Print stock | list | Print 2383-type |
 | Print | Printer light R / G / B | -20 to +20 points (0) | Lab-timer style trim, applied per pixel, instant. One point is 0.025 log E (about 1/12 stop). 0 is the balanced, grey-neutral setting. |
 | Print | Print density | -20 to +20 points (0) | Points added to all three lights together: overall printing density. |
+| Film format | Format | list (Super 35) | Gate width of the film the picture is laid onto: Super 35 (24.89 mm), 35mm Academy (21.95 mm), Super 16 (12.52 mm), 16mm (10.26 mm), 65mm 5-perf (52.48 mm) or Custom. It sets the real size, in millimetres, of every effect below. |
+| Film format | Gate width (mm) | 5 to 80 (24.89) | Only active when Format is Custom. |
+| Sharpness | Enable | on | Emulsion light scatter and development edge effects, in the negative and in the print. |
+| Halation | Enable | on | Light that passes through the emulsion, bounces off the back of the film base and exposes the layers again. |
+| Halation | Rem-jet | on | On: the stock's anti-halation backing is present (faint halo). Off: the backing is removed, as in a bleached or "ECN-2 prep skipped" look (strong red glow). |
+| Halation | Strength | 0 to 5 (1) | 1 is the physical amount; above 1 is for taste. |
+| Halation | Radius | 0.25 to 4 (1) | Multiplier on the physical radius. |
+| Bloom | Enable | off | In-camera diffusion (lens or diffusion filter) before the light reaches the negative. |
+| Bloom | Amount | 0 to 1 (0.25) | Share of the light that is diffused. |
+| Bloom | Radius (mm) | 0.05 to 5 (0.5) | Diffusion radius measured on the film. |
 
 **How the printer lights behave.** More light in a channel exposes that print layer more, so it
 forms *more* of the complementary dye. Red light up, more cyan dye, so the picture moves toward
 cyan (and loses red), exactly as a lab timer's trim does. Print density up makes the whole print
 denser and darker; down makes it lighter.
+
+## Sharpness, halation, bloom and film format
+
+These effects act in the place of the chain where they happen in real film, not as a filter on the
+finished picture. Sizes are in millimetres on the film, so the **Format** menu matters: the same
+halo is a bigger part of a Super 16 frame than of a Super 35 one, and a 65mm frame is cleaner.
+Switching format changes how big these effects are, not how the colour looks. With all three
+effects off, the picture is exactly what Milestone 3 gave you.
+
+* **Bloom** (optional, off by default) happens first, in front of the negative: some of the scene
+  light is spread by a diffusion filter or lens. It acts on exposure, so bright highlights bloom
+  much more than shadows, as they do in the camera.
+* **Sharpness, negative.** Light scatters inside each emulsion layer before it is recorded, which
+  softens fine detail; each of the three layers has its own softness. During development the
+  chemistry then exaggerates edges slightly (the adjacency or edge effect), which restores some
+  bite. Both are fitted to the datasheet's MTF (sharpness versus detail size) curves.
+* **Halation** acts on the exposure too. Light that gets through the emulsion reflects off the back
+  of the film base and re-exposes the layers around the bright spot. The returned light is red
+  because only the red layer sits deepest and is lit most by it, so highlights get a red-orange
+  halo. With Rem-jet on, the dark backing absorbs nearly all of it (about 1 % comes back); with
+  it off, much more does (about 29 %), giving the classic glow.
+* **Sharpness, print.** The print film scatters light again (three scatter lobes rather than two),
+  and develops its own edge effect. This one acts in the print's density, which is why the 2383
+  sharpness curves rise above 100 %.
+
+### What is measured and what is assumed
+
+* **Fitted to data.** The scatter lobes and edge effect come from the digitised datasheet MTF
+  curves. The worst point of each fit, in response units (1.0 = 100 %): 5219 red 0.017, green
+  0.022, blue 0.007; 2383 red 0.009, green 0.046, blue 0.010.
+* **Limits on the edge effect.** The print has three scatter lobes plus an edge effect in print
+  density. The edge reach is capped at 0.5 mm and the edge gain at 0.3: larger values cancelled
+  the dip only on sine-wave test targets and would put a visible fringe on real edges.
+* **Assumed, not published.** No manufacturer publishes halation values, so these are assumptions:
+  the base is 0.127 mm acetate (the datasheet says acetate base with a rem-jet backing); the light
+  returned is 1 % with rem-jet and 29 % without; and how the halo is shared between the layers is
+  derived from the 5219 sensitivities, which in practice means red only. **Strength** exists so
+  you can adjust it to taste.
+
+### Window and render scale
+
+The effects need to see a little beyond the area being drawn, so OpenFilm asks Resolve for a
+slightly larger source region than the one it renders (the margin depends on which effects are on
+and on the format; with everything off it asks for nothing extra). At the edge of the frame the
+picture is extended by repeating its border pixels. On proxy or reduced-resolution playback the
+sizes are kept in proportion: a halo that is 1/50 of the width at full resolution is also 1/50 of
+the width at half resolution.
 
 ## How it renders: GPU, with no waiting on the printer lights
 
@@ -133,7 +190,7 @@ review images generated in `build/digitize-review/`.
   for it.
 * **No print D-min or base spectrum.** The print is modelled as dye density only; the clear
   base and fog of the real print film are not added.
-* **No halation, bloom or grain** yet; those come in later milestones.
+* **No grain** yet; it comes in a later milestone. Halation, bloom and sharpness are in (see above); their halation inputs are assumptions.
 * **Lookup tables.** The exposure table is 129 points per side, the print-exposure and print
   tables 97 (their points are packed toward clear film, where the eye is most sensitive).
 * **Baked versus the full spectral model.** Across Exposure +/-5 stops, with printer lights and
@@ -143,8 +200,13 @@ review images generated in `build/digitize-review/`.
   these can be off by up to about **0.57 dE2000**, still below a just-noticeable difference (~1).
 * **Extreme Exposure.** Beyond +/-5 stops, the deepest shadows are checked less tightly.
 * **GPU versus CPU reference.** They agree within 1/1000 of a code value (measured 0.00008).
-* **Speed.** The colour path takes about 3.6-4 ms per UHD frame on an M4 Pro for normal footage;
-  the worst case (pure random noise) is about 9 ms. Real time either way.
+* **Speed.** The colour path alone takes about 4 ms per UHD frame on an M4 Pro for normal footage.
+  With every effect on, UHD takes about **19.6 ms** (median, on a pure-noise frame, the hard case),
+  which is real time at 24 fps. While rendering, one UHD frame uses about 530 MB of GPU memory;
+  one idle set is kept so the next frame starts fast, and it can be released if the system needs
+  memory.
+* **Exposure table precision.** The exposure table is stored rounded to half precision on both the
+  CPU and the GPU; against the direct model the worst difference is **0.444 dE2000**.
 
 ## Glossary
 
