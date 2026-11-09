@@ -1,6 +1,6 @@
 # How OpenFilm's colour model works
 
-This page describes what OpenFilm (Milestone 2) actually does to your picture, in film terms. It is
+This page describes what OpenFilm (Milestone 3) actually does to your picture, in film terms. It is
 written for colorists; no code reading needed. Everything here is the current build, including
 its shortcuts (see "Known approximations").
 
@@ -58,9 +58,9 @@ projector → screen.**
 | Colour | Output space | one entry | Rec.709, Gamma 2.4 |
 | Colour | Gamut compression | 0 to 1 (0.5) | 0 hard-clips colours outside what real light can make; 1 starts a soft roll-in earlier. Leave near the middle unless neon or LED colours misbehave. |
 | Negative | Negative stock | list | Tungsten 500T (5219-type) |
-| Negative | Exposure | -10 to +10 stops (0) | Over- or underexposes the negative. Changing it never causes a re-bake. |
+| Negative | Exposure | -10 to +10 stops (0) | Over- or underexposes the negative. Applied per pixel, instant. |
 | Print | Print stock | list | Print 2383-type |
-| Print | Printer light R / G / B | -20 to +20 points (0) | Lab-timer style trim. One point is 0.025 log E (about 1/12 stop). 0 is the balanced, grey-neutral setting. |
+| Print | Printer light R / G / B | -20 to +20 points (0) | Lab-timer style trim, applied per pixel, instant. One point is 0.025 log E (about 1/12 stop). 0 is the balanced, grey-neutral setting. |
 | Print | Print density | -20 to +20 points (0) | Points added to all three lights together: overall printing density. |
 
 **How the printer lights behave.** More light in a channel exposes that print layer more, so it
@@ -68,23 +68,27 @@ forms *more* of the complementary dye. Red light up, more cyan dye, so the pictu
 cyan (and loses red), exactly as a lab timer's trim does. Print density up makes the whole print
 denser and darker; down makes it lighter.
 
-## Why playback is slow in this milestone
+## How it renders: GPU, with no waiting on the printer lights
 
-M2 runs entirely on the CPU. Resolve's GPU (Metal) path is switched off for this plugin until M3,
-so expect slow scrubbing and playback; this is a look-development build.
+OpenFilm renders on the GPU (Metal in Resolve), so playback is real time. The CPU version of the
+same maths is kept as the reference: the GPU is checked against it, and they agree to well below
+anything visible.
 
-To keep each frame manageable, the spectral maths is pre-computed ("baked") into lookup tables:
-a 113 x 113 x 113 table for the negative (DI code to exposure) and a 97 x 97 x 97 table for the
-print (negative density to display code). The sizes were chosen so the tables agree with the full
-spectral calculation to within 0.4 dE2000 (measured worst case 0.38 over 2000 random colours and
-Exposure from -5 to +5 stops, the range the slider shows; 0.34 for deep shadows pushed the same
-amount). Exposure beyond +/-5 stops is still correct in the midtones and highlights but is not
-checked as tightly in the deepest shadows. Building them takes about **1.4 s**, and happens
-whenever the printer lights, print density, stocks or gamut compression change. Exposure never
-re-bakes, so it is the control to ride while playing. The last four looks are cached, so returning
-to one of them (the same exact settings) is instant. A slider drag passes through many new looks,
-and each one is a fresh bake; while one bakes, frames that use an already-baked look keep
-rendering.
+To keep each frame fast, the spectral maths is pre-computed ("baked") into lookup tables. The
+negative side is one table (DI code to exposure). The print side is computed in two tables, split
+at the point where the print is exposed. The printer lights act exactly at that split, like a
+printer's light valves sitting between the negative and the print stock. The first table takes the
+negative to the light that reaches the print; your lights and Print density then shift that light
+per pixel; the second table takes it on to the screen.
+
+Because of this split, **Exposure, the three printer lights and Print density are all applied per
+pixel with no recompute**: drag them freely during playback and the picture follows immediately.
+The last table stores projected light on a log scale (so deep shadows keep their detail), and the
+screen's black clip and Gamma 2.4 are applied per pixel afterwards.
+
+Only a change of stock or Gamut compression needs a new bake, which takes about **1.4 s**; playback
+then shows the new look. The last four looks are cached, so returning to one of them (the same
+exact settings) is instant. While one bakes, frames that use an already-baked look keep rendering.
 
 ## Where the stock data comes from
 

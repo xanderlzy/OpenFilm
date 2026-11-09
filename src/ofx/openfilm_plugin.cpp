@@ -125,20 +125,9 @@ public:
             showError("OpenFilm: film data failed to load: " + film.error);
             OFX::throwSuiteStatusException(kOfxStatFailed);
         }
-        // Choice entries are listed by display name; the model wants stock ids.
-        const auto pick = [&](const std::vector<const openfilm::Stock*>& list, OFX::ChoiceParam* p) {
-            int i = 0;
-            p->getValueAtTime(args.time, i);
-            return list[size_t(std::clamp(i, 0, int(list.size()) - 1))]->id;
-        };
         openfilm::FilmParams fp;
-        fp.negativeId = pick(film.negatives, negativeStock_);
-        fp.printId = pick(film.prints, printStock_);
-        fp.gamutCompression = gamutCompression_->getValueAtTime(args.time);
         openfilm::LookControls controls;  // applied per pixel, never rebaked
-        controls.exposureStops = exposure_->getValueAtTime(args.time);
-        for (int i = 0; i < 3; ++i) controls.printerPoints[size_t(i)] = printerLight_[i]->getValueAtTime(args.time);
-        controls.printDensity = printDensity_->getValueAtTime(args.time);
+        readLook(args, film, fp, controls);
         std::shared_ptr<const openfilm::BakedFilm> baked;
         try {
             baked = film.cache->get(fp);  // re-bakes (~1.4 s) only when the look changed
@@ -148,16 +137,17 @@ public:
         }
 
         if (args.isEnabledMetalRender) {
-            // GPU path: getPixelData() is an id<MTLBuffer>, not CPU memory. (Metal is still declared
-            // unsupported, so Resolve should not take this branch yet.)
+            // GPU path: getPixelData() is an id<MTLBuffer>, not CPU memory.
             openfilm::MetalRenderer& gpu = metalRenderer();
             if (!gpu.isValid()) {
                 showError("OpenFilm: GPU shaders failed to load: " + gpu.error());
                 OFX::throwSuiteStatusException(kOfxStatFailed);
             }
             if (!gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win, baked,
-                            controls))
+                            controls)) {
+                showError("OpenFilm: GPU render failed");
                 OFX::throwSuiteStatusException(kOfxStatFailed);
+            }
             clearError();
             return;
         }
@@ -174,6 +164,23 @@ public:
     }
 
 private:
+    // The single place the controls are read, so the CPU and GPU paths can never disagree.
+    void readLook(const OFX::RenderArguments& args, const LoadedFilm& film, openfilm::FilmParams& fp,
+                  openfilm::LookControls& controls) {
+        // Choice entries are listed by display name; the model wants stock ids.
+        const auto pick = [&](const std::vector<const openfilm::Stock*>& list, OFX::ChoiceParam* p) {
+            int i = 0;
+            p->getValueAtTime(args.time, i);
+            return list[size_t(std::clamp(i, 0, int(list.size()) - 1))]->id;
+        };
+        fp.negativeId = pick(film.negatives, negativeStock_);
+        fp.printId = pick(film.prints, printStock_);
+        fp.gamutCompression = gamutCompression_->getValueAtTime(args.time);
+        controls.exposureStops = exposure_->getValueAtTime(args.time);
+        for (int i = 0; i < 3; ++i) controls.printerPoints[size_t(i)] = printerLight_[i]->getValueAtTime(args.time);
+        controls.printDensity = printDensity_->getValueAtTime(args.time);
+    }
+
     // Resolve does not implement the OFX message suite's persistent messages; the Support library
     // turns that into a kOfxStatErrUnsupported exception, which would fail an otherwise finished
     // render (Resolve then discards the frame). Messages are best-effort, never fatal.
@@ -219,8 +226,8 @@ void OpenFilmFactory::describe(OFX::ImageEffectDescriptor& desc) {
     desc.setSupportsMultiResolution(false);
     desc.setTemporalClipAccess(false);
     desc.setRenderThreadSafety(OFX::eRenderFullySafe);
-    // M2 renders on the CPU only; M3 ports the film model to Metal and turns this back on.
-    desc.setSupportsMetalRender(false);
+    // Resolve hands us GPU buffers and a command queue; the CPU path stays as the reference/fallback.
+    desc.setSupportsMetalRender(true);
 }
 
 void OpenFilmFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::ContextEnum /*context*/) {
