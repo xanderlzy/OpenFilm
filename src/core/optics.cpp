@@ -10,6 +10,9 @@ namespace openfilm {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kEdgeSigmaMin = 0.005, kEdgeSigmaMax = 0.5;  // mm; adjacency acts well under 1 mm
+// Edge gain bound: adjacency gains in normal processing are modest, and a large gain acting in print
+// density would not cancel against wide scatter on a real high-contrast edge (it would fringe).
+constexpr double kEdgeKMax = 0.3;
 
 // What is being fitted: `lobes` scatter Gaussians (2 or 3) and, optionally, the edge term.
 struct Shape {
@@ -19,8 +22,8 @@ struct Shape {
 };
 
 // Unconstrained fit parameters, in order: lobes-1 weight logits (softmax, the last logit fixed at 0;
-// with 2 lobes that is a logistic), lobes log-sigmas, then with the edge term log k and the logit of
-// sigma_A between kEdgeSigmaMin and kEdgeSigmaMax.
+// with 2 lobes that is a logistic), lobes log-sigmas, then with the edge term the logits of k in
+// [0, kEdgeKMax] and of sigma_A between kEdgeSigmaMin and kEdgeSigmaMax.
 using Params = std::array<double, 8>;
 
 double logistic(double a) { return 1.0 / (1.0 + std::exp(-a)); }
@@ -39,7 +42,7 @@ LayerSharpness decode(const Params& x, Shape sh) {
   for (int i = 0; i < L; ++i) s.scatter.push_back({w[i] / sum, std::exp(x[size_t(L - 1 + i)])});
   if (sh.edge) {
     const int e = 2 * L - 1;
-    s.edgeK = std::exp(x[size_t(e)]);
+    s.edgeK = kEdgeKMax * logistic(x[size_t(e)]);
     s.edgeSigmaMm = kEdgeSigmaMin + (kEdgeSigmaMax - kEdgeSigmaMin) * logistic(x[size_t(e + 1)]);
   }
   return s;
@@ -131,7 +134,8 @@ LayerSharpness fitSharpness(const MtfCurve& mtf, bool withEdgeEffect, int scatte
     if (p[1] < 0.5) { f50 = p[0]; break; }
   const double s50 = std::sqrt(std::log(2.0) / (2 * kPi * kPi)) / f50;
 
-  // k = 0 cannot be written as exp(x), so the "no edge effect" start is a negligible gain of 1e-6.
+  // k = 0 and k = kEdgeKMax are the logistic's asymptotes, so the "no edge effect" start is a negligible
+  // gain of 1e-6 and the top start is pulled just inside the bound (0.299).
   // Edge-width starts span 0.02-0.2 mm (bounded to 0.005-0.5): a wide edge Gaussian is what lifts the response above 100 %
   // at the lowest datasheet frequencies (the 2383 hump peaks at or below 2.5 c/mm).
   const Shape sh{scatterLobes, withEdgeEffect};
@@ -152,7 +156,7 @@ LayerSharpness fitSharpness(const MtfCurve& mtf, bool withEdgeEffect, int scatte
           start[i++] = std::log(0.3 / 0.1);
         }
         for (int l = 0; l < scatterLobes; ++l) start[i++] = std::log(s1 * std::pow(4.0, l));  // sigma_{n+1} = 4 sigma_n
-        start[i++] = std::log(k);
+        start[i++] = logit(std::min(k, kEdgeKMax - 1e-3) / kEdgeKMax);
         start[i++] = logit((sA - kEdgeSigmaMin) / (kEdgeSigmaMax - kEdgeSigmaMin));
         const Params x = nelderMead(mtf, start, sh);
         const double err = sumSquaredError(mtf, x, sh);

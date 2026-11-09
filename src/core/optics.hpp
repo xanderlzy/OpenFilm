@@ -31,7 +31,7 @@ double gaussianMtf(double sigmaMm, double cyclesPerMm);
 double sharpnessResponse(const LayerSharpness& s, double cyclesPerMm);
 
 // Least-squares fit of `scatterLobes` (2 or 3) scatter lobes (and, with withEdgeEffect, the edge gain
-// and a width bounded to [0.005, 0.5] mm) to a datasheet curve. Lobes come back sorted by sigma,
+// bounded to [0, 0.3] and a width bounded to [0.005, 0.5] mm) to a datasheet curve. Lobes come back sorted by sigma,
 // ascending. Deterministic: Nelder-Mead from fixed starts, best kept.
 LayerSharpness fitSharpness(const MtfCurve& mtf, bool withEdgeEffect, int scatterLobes = 2);
 

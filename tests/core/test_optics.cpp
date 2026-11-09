@@ -37,6 +37,7 @@ void checkFit(const MtfCurve& mtf, bool withEdge, int lobes, double bar, const c
   for (size_t i = 1; i < s.scatter.size(); ++i) CHECK(s.scatter[i - 1].sigmaMm <= s.scatter[i].sigmaMm);
   CHECK(std::abs(sum - 1) < 1e-9);
   CHECK(s.edgeK >= 0);
+  CHECK(s.edgeK <= 0.3);
   if (withEdge) {
     CHECK(s.edgeSigmaMm >= 0.005);
     CHECK(s.edgeSigmaMm <= 0.5);
