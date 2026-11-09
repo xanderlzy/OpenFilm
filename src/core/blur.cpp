@@ -1,0 +1,189 @@
+#include "core/blur.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <thread>
+
+namespace openfilm {
+
+namespace {
+
+// Runs fn(yBegin, yEnd) over [0, rows) on a pool sized from the hardware, as film_renderer does.
+void parallelRows(int rows, const std::function<void(int, int)>& fn) {
+  if (rows <= 0) return;
+  const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, rows);
+  if (threads == 1) {
+    fn(0, rows);
+    return;
+  }
+  std::vector<std::thread> pool;
+  pool.reserve(size_t(threads));
+  for (int t = 0; t < threads; ++t) pool.emplace_back(fn, rows * t / threads, rows * (t + 1) / threads);
+  for (auto& th : pool) th.join();
+}
+
+std::vector<float> makeTaps(float sigma) {
+  const int r = blurRadiusPx(sigma);
+  std::vector<float> taps(size_t(2 * r + 1));
+  double sum = 0;
+  std::vector<double> t(taps.size());
+  for (int i = -r; i <= r; ++i) {
+    t[size_t(i + r)] = std::exp(-double(i) * i / (2.0 * double(sigma) * double(sigma)));
+    sum += t[size_t(i + r)];
+  }
+  for (size_t i = 0; i < t.size(); ++i) taps[i] = float(t[i] / sum);
+  return taps;
+}
+
+void resizeTo(Image4f& img, int w, int h) {
+  img.width = w;
+  img.height = h;
+  img.px.assign(size_t(w) * size_t(h) * 4, 0.f);
+}
+
+inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// Separable blur of RGB; alpha copied.
+void blurImpl(const Image4f& in, Image4f& out, const std::array<float, 3>& sigma) {
+  const int w = in.width, h = in.height;
+  resizeTo(out, w, h);
+  std::vector<float> taps[3];
+  int radius[3];
+  for (int c = 0; c < 3; ++c) {
+    radius[c] = blurRadiusPx(sigma[size_t(c)]);
+    if (radius[c] > 0) taps[c] = makeTaps(sigma[size_t(c)]);
+  }
+  Image4f tmp;
+  resizeTo(tmp, w, h);
+  parallelRows(h, [&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y)
+      for (int x = 0; x < w; ++x) {
+        const float* src = in.at(x, y);
+        float* dst = tmp.at(x, y);
+        for (int c = 0; c < 3; ++c) {
+          const int r = radius[c];
+          if (r == 0) {
+            dst[c] = src[c];
+            continue;
+          }
+          float acc = 0.f;
+          for (int i = -r; i <= r; ++i) acc += taps[c][size_t(i + r)] * in.at(clampi(x + i, 0, w - 1), y)[c];
+          dst[c] = acc;
+        }
+        dst[3] = src[3];
+      }
+  });
+  parallelRows(h, [&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y)
+      for (int x = 0; x < w; ++x) {
+        float* dst = out.at(x, y);
+        for (int c = 0; c < 3; ++c) {
+          const int r = radius[c];
+          if (r == 0) {
+            dst[c] = tmp.at(x, y)[c];
+            continue;
+          }
+          float acc = 0.f;
+          for (int i = -r; i <= r; ++i) acc += taps[c][size_t(i + r)] * tmp.at(x, clampi(y + i, 0, h - 1))[c];
+          dst[c] = acc;
+        }
+        dst[3] = tmp.at(x, y)[3];
+      }
+  });
+}
+
+// f x f box average; partial edge blocks average only their real pixels.
+void boxDown(const Image4f& in, Image4f& out, int f) {
+  const int w = (in.width + f - 1) / f, h = (in.height + f - 1) / f;
+  resizeTo(out, w, h);
+  parallelRows(h, [&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y)
+      for (int x = 0; x < w; ++x) {
+        const int xe = std::min((x + 1) * f, in.width), ye = std::min((y + 1) * f, in.height);
+        float s[4] = {0, 0, 0, 0};
+        for (int yy = y * f; yy < ye; ++yy)
+          for (int xx = x * f; xx < xe; ++xx)
+            for (int c = 0; c < 4; ++c) s[c] += in.at(xx, yy)[c];
+        const float inv = 1.f / float((xe - x * f) * (ye - y * f));
+        for (int c = 0; c < 4; ++c) out.at(x, y)[c] = s[c] * inv;
+      }
+  });
+}
+
+// Bilinear upsample at fine-pixel centres ((x + 0.5)/f - 0.5), clamp-to-edge; adds weight * result to RGB of acc.
+void upAccumulate(const Image4f& small, Image4f& acc, int f, float weight) {
+  const int sw = small.width, sh = small.height;
+  parallelRows(acc.height, [&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y) {
+      const float fy = (float(y) + 0.5f) / float(f) - 0.5f;
+      const float flY = std::floor(fy);
+      const float ty = fy - flY;
+      const int ya = clampi(int(flY), 0, sh - 1), yb = clampi(int(flY) + 1, 0, sh - 1);
+      for (int x = 0; x < acc.width; ++x) {
+        const float fx = (float(x) + 0.5f) / float(f) - 0.5f;
+        const float flX = std::floor(fx);
+        const float tx = fx - flX;
+        const int xa = clampi(int(flX), 0, sw - 1), xb = clampi(int(flX) + 1, 0, sw - 1);
+        const float* p00 = small.at(xa, ya);
+        const float* p10 = small.at(xb, ya);
+        const float* p01 = small.at(xa, yb);
+        const float* p11 = small.at(xb, yb);
+        float* dst = acc.at(x, y);
+        for (int c = 0; c < 3; ++c) {
+          const float top = p00[c] + (p10[c] - p00[c]) * tx;
+          const float bot = p01[c] + (p11[c] - p01[c]) * tx;
+          dst[c] += weight * (top + (bot - top) * ty);
+        }
+      }
+    }
+  });
+}
+
+}  // namespace
+
+int blurRadiusPx(float sigmaPx) { return sigmaPx < 0.25f ? 0 : int(std::ceil(3.f * sigmaPx)); }
+
+int downsampleFactor(float sigmaPx) {
+  if (sigmaPx <= 4.f) return 1;
+  int f = 32;
+  while (f > 1 && sigmaPx / float(f) < 2.f) f /= 2;
+  return f;
+}
+
+void gaussianBlur(const Image4f& in, Image4f& out, const std::array<float, 3>& sigmaPx) { blurImpl(in, out, sigmaPx); }
+
+void spread(const Image4f& in, Image4f& out, const std::vector<PxLobe>& lobes) {
+  resizeTo(out, in.width, in.height);
+  parallelRows(in.height, [&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y)
+      for (int x = 0; x < in.width; ++x) out.at(x, y)[3] = in.at(x, y)[3];
+  });
+  if (in.width <= 0 || in.height <= 0) return;
+  for (const PxLobe& lobe : lobes) {
+    const float smin = std::min({lobe.sigmaPx[0], lobe.sigmaPx[1], lobe.sigmaPx[2]});
+    const int f = downsampleFactor(smin);
+    Image4f blurred;
+    if (f == 1) {
+      blurImpl(in, blurred, lobe.sigmaPx);
+      parallelRows(in.height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+          for (int x = 0; x < in.width; ++x)
+            for (int c = 0; c < 3; ++c) out.at(x, y)[c] += lobe.weight * blurred.at(x, y)[c];
+      });
+    } else {
+      Image4f small;
+      boxDown(in, small, f);
+      std::array<float, 3> s;
+      const float ff = float(f);
+      for (size_t c = 0; c < 3; ++c) {
+        const float sg = lobe.sigmaPx[c];
+        s[c] = std::sqrt(std::max(sg * sg - (ff * ff - 1.f) / 12.f - ff * ff / 6.f, 0.0625f)) / ff;
+      }
+      blurImpl(small, blurred, s);
+      upAccumulate(blurred, out, f, lobe.weight);
+    }
+  }
+}
+
+}  // namespace openfilm
