@@ -3,7 +3,7 @@
 // negative curves (log exposure -> negative density; the Exposure control is applied just before),
 // LUT_PE (negative density -> exposure on the print, no printer lights), three 1D print curves
 // (print log exposure -> print density; the printer lights and Print Density are added just before),
-// LUT_D (print density -> linear display light).
+// LUT_D (print density -> log10 projected XYZ).
 #pragma once
 
 #include <array>
@@ -58,14 +58,15 @@ struct BakedFilm {
   std::array<Curve1D, 3> negCurves;   // log E over [curve min - 1, curve max + 1] -> Status M density
   Lut3D lutPE;                        // neg Status M density (reachable domain) -> print log E, zero offsets
   std::array<Curve1D, 3> printCurves; // print log E over [print curve min - 1, max + 1] -> Status A density
-  Lut3D lutD;                         // print density over [printDensityRange -/+ 0.02, floor 0] -> linear display light (unclipped; the renderer encodes it)
+  Lut3D lutD;                         // print density over [curve min, curve max + 0.02], nodes t^2 (dense at low density) -> log10 of projected XYZ
+  std::array<float, 9> displayMatrix; // XYZ -> linear display light, row-major
   Vec3 balance;                       // auto-balance offsets (log E)
 };
 
 // Default sizes were chosen to keep baked-vs-direct error under 0.5 dE2000 (see the accuracy tests).
 // Holds no reference to `model` afterwards.
-std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE = 113, int lutSizePE = 97,
-                                          int lutSizeD = 129);
+std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE = 129, int lutSizePE = 97,
+                                          int lutSizeD = 97);
 
 // Keeps the last 4 looks so returning to a recent look does not rebake. A bake runs outside the
 // lock and is shared: other threads asking for the same new look wait for it, while threads asking

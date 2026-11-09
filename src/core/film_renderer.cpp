@@ -12,7 +12,7 @@ namespace {
 // Black for anything that is not a real number, so no NaN can reach the lookups.
 inline float sane(float v) { return std::isfinite(v) ? v : 0.f; }
 
-// The table holds projected light; the screen's gamma (BT.1886 ~ 1/2.4) and the clip of colours
+// The table holds the log of the projected light; the matrix has turned it into linear Rec.709; the screen's gamma (BT.1886 ~ 1/2.4) and the clip of colours
 // the display cannot show (negative light -> black) happen here, per pixel.
 inline float encodeDisplay(float linear) { return std::pow(std::max(linear, 0.f), 1.f / 2.4f); }
 
@@ -40,7 +40,12 @@ void renderRows(const ConstImageView& src, const ImageView& dst, const RenderWin
       const auto pe = film.lutPE.lookup(d[0], d[1], d[2]);
       const float pd[3] = {film.printCurves[0].eval(pe[0] + off[0]), film.printCurves[1].eval(pe[1] + off[1]),
                            film.printCurves[2].eval(pe[2] + off[2])};
-      const auto o = film.lutD.lookup(pd[0], pd[1], pd[2]);
+      // Print density -> log of the projected light; undo the log, mix to Rec.709 primaries.
+      const auto q = film.lutD.lookup(pd[0], pd[1], pd[2]);
+      const float xyz[3] = {std::pow(10.f, q[0]), std::pow(10.f, q[1]), std::pow(10.f, q[2])};
+      const float* m = film.displayMatrix.data();
+      float o[3];
+      for (int k = 0; k < 3; ++k) o[k] = m[k * 3] * xyz[0] + m[k * 3 + 1] * xyz[1] + m[k * 3 + 2] * xyz[2];
       out[0] = encodeDisplay(o[0]);
       out[1] = encodeDisplay(o[1]);
       out[2] = encodeDisplay(o[2]);

@@ -150,11 +150,21 @@ Vec3 FilmModel::printLogExposureBase(const Vec3& negStatusMDensity) const {
 
 Vec3 FilmModel::printDensity(const Vec3& printLogE) const { return print_.printDensity(printLogE); }
 
-Vec3 FilmModel::displayLinearFromPrintDensity(const Vec3& printStatusADensity) const {
+Vec3 FilmModel::printLogXyzFromPrintDensity(const Vec3& printStatusADensity) const {
   const Xyz p = print_.projectedXyzFromDensity(printStatusADensity);
-  const Vec3 a = mul(adapt_, Vec3{p.X, p.Y, p.Z});
-  const Vec3 rgb = mul(toRec709_, a);
-  return {rgb[0] * anchorScale_, rgb[1] * anchorScale_, rgb[2] * anchorScale_};
+  return {std::log10(std::max(p.X, 1e-10)), std::log10(std::max(p.Y, 1e-10)), std::log10(std::max(p.Z, 1e-10))};
+}
+
+Mat3 FilmModel::displayMatrix() const {
+  Mat3 m = mul(toRec709_, adapt_);
+  for (auto& row : m)
+    for (double& v : row) v *= anchorScale_;
+  return m;
+}
+
+Vec3 FilmModel::displayLinearFromPrintDensity(const Vec3& printStatusADensity) const {
+  const Vec3 l = printLogXyzFromPrintDensity(printStatusADensity);
+  return mul(displayMatrix(), Vec3{std::pow(10.0, l[0]), std::pow(10.0, l[1]), std::pow(10.0, l[2])});
 }
 
 Vec3 FilmModel::displayFromPrintDensity(const Vec3& printStatusADensity) const {

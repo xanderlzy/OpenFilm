@@ -66,6 +66,11 @@ class FilmModel {
   // Projector light through the print dyes -> D65 -> Rec.709 -> grey anchor: linear display light,
   // unclamped (a saturated dye can push a channel below 0, outside the Rec.709 gamut).
   Vec3 displayLinearFromPrintDensity(const Vec3& printStatusADensity) const;
+  // log10 of the projected XYZ (floor 1e-10 per component). Nearly linear in dye density
+  // (Beer-Lambert), so a table of it interpolates far better than one of linear light.
+  Vec3 printLogXyzFromPrintDensity(const Vec3& printStatusADensity) const;
+  // Projected XYZ -> linear display light in one matrix: Rec.709 . Bradford D55->D65 . grey anchor.
+  Mat3 displayMatrix() const;
   // The same, clipped at black and encoded as BT.1886 code.
   Vec3 displayFromPrintDensity(const Vec3& printStatusADensity) const;
 

@@ -132,18 +132,24 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, 
     }
   }
 
-  // LUT_D: print dye density -> projected light in linear Rec.709, left unclipped. The screen's
-  // gamma and the black clip are applied per pixel, because that corner is too sharp for a table.
+  // LUT_D: print dye density -> log10 of the projected light (XYZ). Light falls off exponentially
+  // with dye density, so the log is nearly a straight line in density and a table follows it well.
+  // The matrix to Rec.709, the screen's gamma and the black clip are applied per pixel.
+  // The domain starts exactly at the print's clear-film density (it cannot go lower), and the nodes
+  // bunch up there: clear highlights are where dye amounts hit zero and the response bends sharply.
   Vec3 pLo, pHi;
   for (int c = 0; c < 3; ++c) {
     const auto range = model.printDensityRange(c);
-    pLo[size_t(c)] = std::max(0.0, range[0] - 0.02);
+    pLo[size_t(c)] = range[0];
     pHi[size_t(c)] = range[1] + 0.02;
   }
-  Lut3D lutD(lutSizeD, pLo, pHi);
-  lutD.bake([&](const Vec3& d) { return model.displayLinearFromPrintDensity(d); });
-  return std::make_shared<const BakedFilm>(
-      BakedFilm{std::move(lutE), std::move(curves), std::move(lutPE), std::move(printCurves), std::move(lutD), model.balance()});
+  Lut3D lutD(lutSizeD, pLo, pHi, true);
+  lutD.bake([&](const Vec3& d) { return model.printLogXyzFromPrintDensity(d); });
+  const Mat3 dm = model.displayMatrix();
+  BakedFilm film{std::move(lutE), std::move(curves), std::move(lutPE), std::move(printCurves), std::move(lutD), {}, model.balance()};
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 3; ++c) film.displayMatrix[size_t(r * 3 + c)] = float(dm[size_t(r)][size_t(c)]);
+  return std::make_shared<const BakedFilm>(std::move(film));
 }
 
 FilmCache::FilmCache(std::shared_ptr<const FilmResources> resources) : res_(std::move(resources)) {}
