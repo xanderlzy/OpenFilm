@@ -63,7 +63,10 @@ class FilmModel {
   Vec3 printLogExposureBase(const Vec3& negStatusMDensity) const;
   // Print Status A density from the print's H&D curves.
   Vec3 printDensity(const Vec3& printLogE) const;
-  // Projector light through the print dyes -> D65 -> Rec.709 -> grey anchor -> BT.1886 code.
+  // Projector light through the print dyes -> D65 -> Rec.709 -> grey anchor: linear display light,
+  // unclamped (a saturated dye can push a channel below 0, outside the Rec.709 gamut).
+  Vec3 displayLinearFromPrintDensity(const Vec3& printStatusADensity) const;
+  // The same, clipped at black and encoded as BT.1886 code.
   Vec3 displayFromPrintDensity(const Vec3& printStatusADensity) const;
 
   // Digitised log E span and min..max density of the print's curve for layer `ch` (0 = red).

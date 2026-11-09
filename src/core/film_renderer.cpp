@@ -12,6 +12,10 @@ namespace {
 // Black for anything that is not a real number, so no NaN can reach the lookups.
 inline float sane(float v) { return std::isfinite(v) ? v : 0.f; }
 
+// The table holds projected light; the screen's gamma (BT.1886 ~ 1/2.4) and the clip of colours
+// the display cannot show (negative light -> black) happen here, per pixel.
+inline float encodeDisplay(float linear) { return std::pow(std::max(linear, 0.f), 1.f / 2.4f); }
+
 void renderRows(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const BakedFilm& film,
                 float gain, const float off[3], int yBegin, int yEnd) {
   for (int y = yBegin; y < yEnd; ++y) {
@@ -37,9 +41,9 @@ void renderRows(const ConstImageView& src, const ImageView& dst, const RenderWin
       const float pd[3] = {film.printCurves[0].eval(pe[0] + off[0]), film.printCurves[1].eval(pe[1] + off[1]),
                            film.printCurves[2].eval(pe[2] + off[2])};
       const auto o = film.lutD.lookup(pd[0], pd[1], pd[2]);
-      out[0] = o[0];
-      out[1] = o[1];
-      out[2] = o[2];
+      out[0] = encodeDisplay(o[0]);
+      out[1] = encodeDisplay(o[1]);
+      out[2] = encodeDisplay(o[2]);
       out[3] = in[3];
     }
   }

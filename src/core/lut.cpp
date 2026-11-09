@@ -132,7 +132,8 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, 
     }
   }
 
-  // LUT_D: print dye density -> what the projected print looks like on a Rec.709 display.
+  // LUT_D: print dye density -> projected light in linear Rec.709, left unclipped. The screen's
+  // gamma and the black clip are applied per pixel, because that corner is too sharp for a table.
   Vec3 pLo, pHi;
   for (int c = 0; c < 3; ++c) {
     const auto range = model.printDensityRange(c);
@@ -140,7 +141,7 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, 
     pHi[size_t(c)] = range[1] + 0.02;
   }
   Lut3D lutD(lutSizeD, pLo, pHi);
-  lutD.bake([&](const Vec3& d) { return model.displayFromPrintDensity(d); });
+  lutD.bake([&](const Vec3& d) { return model.displayLinearFromPrintDensity(d); });
   return std::make_shared<const BakedFilm>(
       BakedFilm{std::move(lutE), std::move(curves), std::move(lutPE), std::move(printCurves), std::move(lutD), model.balance()});
 }

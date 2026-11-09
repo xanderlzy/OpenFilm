@@ -150,12 +150,16 @@ Vec3 FilmModel::printLogExposureBase(const Vec3& negStatusMDensity) const {
 
 Vec3 FilmModel::printDensity(const Vec3& printLogE) const { return print_.printDensity(printLogE); }
 
-Vec3 FilmModel::displayFromPrintDensity(const Vec3& printStatusADensity) const {
+Vec3 FilmModel::displayLinearFromPrintDensity(const Vec3& printStatusADensity) const {
   const Xyz p = print_.projectedXyzFromDensity(printStatusADensity);
   const Vec3 a = mul(adapt_, Vec3{p.X, p.Y, p.Z});
   const Vec3 rgb = mul(toRec709_, a);
-  return {bt1886Encode(rgb[0] * anchorScale_), bt1886Encode(rgb[1] * anchorScale_),
-          bt1886Encode(rgb[2] * anchorScale_)};
+  return {rgb[0] * anchorScale_, rgb[1] * anchorScale_, rgb[2] * anchorScale_};
+}
+
+Vec3 FilmModel::displayFromPrintDensity(const Vec3& printStatusADensity) const {
+  const Vec3 l = displayLinearFromPrintDensity(printStatusADensity);
+  return {bt1886Encode(l[0]), bt1886Encode(l[1]), bt1886Encode(l[2])};
 }
 
 Vec3 FilmModel::printOutput(const Vec3& negStatusMDensity, const LookControls& c) const {
