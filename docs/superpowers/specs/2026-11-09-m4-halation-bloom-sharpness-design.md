@@ -97,7 +97,7 @@ None of these trigger a re-bake of the colour tables. Non-finite values are trea
 | Test | Pass bar |
 |---|---|
 | All M4 effects off | output identical to the M3 path (bit-exact on CPU; GPU within M3's 1e-3) |
-| Sharpness fit per layer, negative and print | fitted response within 0.05 of every digitised datasheet MTF point, including the >100 % hump |
+| Sharpness fit per layer, negative and print | fitted response within 0.05 of every digitised datasheet MTF point, including the >100 % hump. *Amended during build:* the print is scatter-only (a fitted print edge effect tinted every edge), so its bar is 0.08 — the 2383 curves sit 5–6 % above 100 % at 2.54 c/mm, which scatter alone cannot reach |
 | Measured sharpness of the full CPU pipeline (sine targets through the renderer, Halation and Bloom off) | within 0.07 of the datasheet negative curve at the digitised frequencies |
 | Spreading conserves light | each normalised kernel: sum of output = sum of input within 1e-4 relative; edge effect preserves mean density within 1e-4 |
 | Halation physics | a single bright point gets a halo with red > green > blue energy; rem-jet off gives more halo energy than on by the stock data's ratio (±5 %); Halation off adds exactly nothing |
