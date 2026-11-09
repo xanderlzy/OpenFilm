@@ -97,11 +97,11 @@ double deltaE2000(const Vec3& a, const Vec3& b) {
 }
 
 // Renders one pixel through the baked film.
-Vec3 renderOne(const BakedFilm& film, float r, float g, float b, double stops) {
+Vec3 renderOne(const BakedFilm& film, float r, float g, float b, const LookControls& controls) {
   TestImage src(tight(0, 0, 1, 1), 0.f), dst(tight(0, 0, 1, 1), 0.f);
   float* p = src.at(0, 0);
   p[0] = r; p[1] = g; p[2] = b; p[3] = 1.f;
-  renderFilmCpu(src.cview(), dst.view(), {0, 0, 1, 1}, film, stops);
+  renderFilmCpu(src.cview(), dst.view(), {0, 0, 1, 1}, film, controls);
   const float* o = dst.at(0, 0);
   return {o[0], o[1], o[2]};
 }
@@ -115,7 +115,7 @@ TEST_CASE("baked matches direct within DeltaE2000 0.5") {
   std::printf("bake default sizes: %.2f s\n", bakeSec);
 
   std::mt19937 rng(11);
-  std::uniform_real_distribution<double> u(0, 1), ue(-5, 5);  // the plugin's displayed Exposure range
+  std::uniform_real_distribution<double> u(0, 1), ue(-5, 5), up(-20, 20);  // displayed Exposure range; printer points
   double maxDe = 0;
   std::vector<double> all;
   Vec3 worstIn{}, worstDirect{}, worstBaked{};
@@ -123,8 +123,11 @@ TEST_CASE("baked matches direct within DeltaE2000 0.5") {
   for (int i = 0; i < 2000; ++i) {
     const Vec3 in{u(rng), u(rng), u(rng)};
     const double stops = ue(rng);
-    const Vec3 direct = model.evaluate(in, look(stops));
-    const Vec3 baked = renderOne(*film, float(in[0]), float(in[1]), float(in[2]), stops);
+    LookControls c = look(stops);
+    c.printerPoints = {up(rng), up(rng), up(rng)};
+    c.printDensity = up(rng);
+    const Vec3 direct = model.evaluate(in, c);
+    const Vec3 baked = renderOne(*film, float(in[0]), float(in[1]), float(in[2]), c);
     const double de = deltaE2000(toLab(direct), toLab(baked));
     all.push_back(de);
     if (de > maxDe) { maxDe = de; worstIn = in; worstStops = stops; worstDirect = direct; worstBaked = baked; }
@@ -145,13 +148,16 @@ TEST_CASE("baked matches direct in the deep shadows with exposure pushed") {
   const FilmModel model(res(), params());
   const auto film = cache().get(params());
   std::mt19937 rng(23);
-  std::uniform_real_distribution<double> u(0, 0.05), ue(-5, 5);
+  std::uniform_real_distribution<double> u(0, 0.05), ue(-5, 5), up(-20, 20);
   double maxDe = 0, maxGrey = 0;
   for (int i = 0; i < 3000; ++i) {
     const Vec3 in{u(rng), u(rng), u(rng)};
     const double stops = ue(rng);
-    const double de = deltaE2000(toLab(model.evaluate(in, look(stops))),
-                                 toLab(renderOne(*film, float(in[0]), float(in[1]), float(in[2]), stops)));
+    LookControls c = look(stops);
+    c.printerPoints = {up(rng), up(rng), up(rng)};
+    c.printDensity = up(rng);
+    const double de = deltaE2000(toLab(model.evaluate(in, c)),
+                                 toLab(renderOne(*film, float(in[0]), float(in[1]), float(in[2]), c)));
     maxDe = std::max(maxDe, de);
   }
   for (int i = 0; i <= 60; ++i)
@@ -159,7 +165,7 @@ TEST_CASE("baked matches direct in the deep shadows with exposure pushed") {
       const double v = 0.03 * i / 60;  // neutral ramp from black to DI 0.03
       const Vec3 in{v, v, v};
       maxGrey = std::max(maxGrey, deltaE2000(toLab(model.evaluate(in, look(stops))),
-                                             toLab(renderOne(*film, float(v), float(v), float(v), stops))));
+                                             toLab(renderOne(*film, float(v), float(v), float(v), look(stops)))));
     }
   std::printf("dark random max dE2000 %.4f, dark grey ramp max %.4f\n", maxDe, maxGrey);
   CHECK(maxDe < 0.5);
@@ -169,11 +175,14 @@ TEST_CASE("baked matches direct in the deep shadows with exposure pushed") {
 TEST_CASE("baked tables are finite and prints are non-negative") {
   const auto film = cache().get(params());
   for (float v : film->lutE.data()) CHECK(std::isfinite(v));
-  for (float v : film->lutP.data()) {
+  for (float v : film->lutPE.data()) CHECK(std::isfinite(v));
+  for (float v : film->lutD.data()) {
     CHECK(std::isfinite(v));
     CHECK(v >= 0.f);
   }
   for (const auto& c : film->negCurves)
+    for (float v : c.values) CHECK(std::isfinite(v));
+  for (const auto& c : film->printCurves)
     for (float v : c.values) CHECK(std::isfinite(v));
 }
 
@@ -182,8 +191,39 @@ TEST_CASE("exposure needs no rebake") {
   CHECK(cache().get(p) == cache().get(p));
   const auto film = cache().get(p);
   const float c = float(diEncode(0.18));
-  const Vec3 a = renderOne(*film, c, c, c, 0), b = renderOne(*film, c, c, c, 1);
+  const Vec3 a = renderOne(*film, c, c, c, look(0)), b = renderOne(*film, c, c, c, look(1));
   CHECK(b[1] > a[1] + 0.01);
+}
+
+TEST_CASE("printer lights and print density need no rebake") {
+  const auto film = cache().get(params());
+  const float c = float(diEncode(0.18));
+  LookControls none, red; red.printerPoints = {5, 0, 0};
+  const Vec3 a = renderOne(*film, c, c, c, none), b = renderOne(*film, c, c, c, red);
+  CHECK(cache().get(params()) == film);  // same bake object
+  CHECK(b[0] < a[0] - 0.01);             // R +5 -> more cyan dye -> less red
+}
+
+TEST_CASE("extreme and non-finite controls") {
+  const auto film = cache().get(params());
+  LookControls big; big.printerPoints = {50, -50, 50}; big.printDensity = -50; big.exposureStops = 10;
+  const Vec3 o = renderOne(*film, 0.5f, 0.2f, 0.9f, big);
+  for (double v : o) CHECK(std::isfinite(v));
+  LookControls nan; nan.printerPoints = {NAN, 0, 0}; nan.printDensity = INFINITY; nan.exposureStops = NAN;
+  const Vec3 n = renderOne(*film, 0.4f, 0.4f, 0.4f, nan), z = renderOne(*film, 0.4f, 0.4f, 0.4f, LookControls{});
+  for (int k = 0; k < 3; ++k) CHECK(n[k] == z[k]);
+}
+
+TEST_CASE("print exposure beyond the print curve clamps") {
+  // Clear negative (DI 0) at +20 points and a dense one at -20: print log E leaves the curve's range.
+  const FilmModel model(res(), params());
+  const auto film = cache().get(params());
+  for (double pts : {-20.0, 20.0})
+    for (float v : {0.f, 1.f}) {
+      LookControls c; c.printerPoints = {pts, pts, pts}; c.printDensity = pts; c.exposureStops = pts > 0 ? 10 : -10;
+      const Vec3 baked = renderOne(*film, v, v, v, c), direct = model.evaluate({v, v, v}, c);
+      CHECK(deltaE2000(toLab(direct), toLab(baked)) < 0.5);
+    }
 }
 
 TEST_CASE("window, bounds and padding respected") {
@@ -196,7 +236,7 @@ TEST_CASE("window, bounds and padding respected") {
       float* p = src.at(x, y);
       p[0] = 0.4f + 0.02f * float(x - 100); p[1] = 0.4f; p[2] = 0.4f + 0.02f * float(y - 50); p[3] = 0.25f + float(x - 100);
     }
-  renderFilmCpu(src.cview(), dst.view(), {100, 50, 105, 53}, *film, 0.0);  // window sticks out past src on the right
+  renderFilmCpu(src.cview(), dst.view(), {100, 50, 105, 53}, *film, LookControls{});  // window sticks out past src on the right
   for (int y = 50; y < 53; ++y)
     for (int x = 98; x < 106; ++x) {
       const float* d = dst.at(x, y);
@@ -208,7 +248,7 @@ TEST_CASE("window, bounds and padding respected") {
         for (int c = 0; c < 4; ++c) CHECK(d[c] == 0.f);
       } else {
         CHECK(d[3] == 0.25f + float(x - 100));
-        const Vec3 ref = renderOne(*film, src.at(x, y)[0], src.at(x, y)[1], src.at(x, y)[2], 0);
+        const Vec3 ref = renderOne(*film, src.at(x, y)[0], src.at(x, y)[1], src.at(x, y)[2], LookControls{});
         for (int c = 0; c < 3; ++c) { CHECK(std::isfinite(d[c])); CHECK(d[c] == doctest::Approx(ref[c])); }
       }
     }
@@ -217,17 +257,17 @@ TEST_CASE("window, bounds and padding respected") {
 TEST_CASE("out-of-domain and non-finite inputs") {
   const auto film = cache().get(params());
   const float inf = std::numeric_limits<float>::infinity(), nan = std::numeric_limits<float>::quiet_NaN();
-  const Vec3 zero = renderOne(*film, 0, 0, 0, 0);
+  const Vec3 zero = renderOne(*film, 0, 0, 0, LookControls{});
   for (float v : {-0.5f, 1.7f, nan, inf, -inf}) {
-    const Vec3 o = renderOne(*film, v, v, v, 0);
+    const Vec3 o = renderOne(*film, v, v, v, LookControls{});
     for (double c : o) CHECK(std::isfinite(c));
   }
-  const Vec3 one = renderOne(*film, 1.0f, 1.0f, 1.0f, 0);
-  const Vec3 over = renderOne(*film, 1.7f, 1.7f, 1.7f, 0);
+  const Vec3 one = renderOne(*film, 1.0f, 1.0f, 1.0f, LookControls{});
+  const Vec3 over = renderOne(*film, 1.7f, 1.7f, 1.7f, LookControls{});
   for (int c = 0; c < 3; ++c) CHECK(over[c] == one[c]);  // clamped to the edge of the domain
-  const Vec3 neg = renderOne(*film, -0.5f, -0.5f, -0.5f, 0);
+  const Vec3 neg = renderOne(*film, -0.5f, -0.5f, -0.5f, LookControls{});
   for (int c = 0; c < 3; ++c) CHECK(neg[c] == zero[c]);
-  const Vec3 bad = renderOne(*film, nan, inf, -inf, 0);
+  const Vec3 bad = renderOne(*film, nan, inf, -inf, LookControls{});
   for (int c = 0; c < 3; ++c) CHECK(bad[c] == zero[c]);
 }
 
@@ -238,7 +278,7 @@ TEST_CASE("concurrent cache use") {
     const float c = float(diEncode(0.18));
     for (int y = 0; y < 16; ++y)
       for (int x = 0; x < 16; ++x) { float* p = src.at(x, y); p[0] = p[1] = p[2] = c; p[3] = 1.f; }
-    renderFilmCpu(src.cview(), dst.view(), {0, 0, 16, 16}, f, 0.5);
+    renderFilmCpu(src.cview(), dst.view(), {0, 0, 16, 16}, f, look(0.5));
     return std::vector<float>(dst.at(0, 0), dst.at(0, 0) + 4);
   };
   FilmCache c(res());
@@ -262,9 +302,9 @@ TEST_CASE("non-finite exposure is treated as zero stops") {
     const auto film = cache().get(params());
     TestImage src(tight(0, 0, 2, 1), 0.4f), ref(tight(0, 0, 2, 1), 0.f), bad(tight(0, 0, 2, 1), 0.f);
     const RenderWindow win{0, 0, 2, 1};
-    renderFilmCpu(src.cview(), ref.view(), win, *film, 0.0);
+    renderFilmCpu(src.cview(), ref.view(), win, *film, LookControls{});
     for (double v : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
-        renderFilmCpu(src.cview(), bad.view(), win, *film, v);
+        renderFilmCpu(src.cview(), bad.view(), win, *film, look(v));
         for (int c = 0; c < 3; ++c) CHECK(bad.at(0, 0)[c] == ref.at(0, 0)[c]);
     }
 }

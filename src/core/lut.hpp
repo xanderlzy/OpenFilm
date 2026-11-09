@@ -1,7 +1,9 @@
 // Baked film: the slow spectral model is sampled once into small tables so the per-pixel work is
-// a few table lookups. Three stages: LUT_E (DI code -> exposure, stored as log10(E + eps)), three 1D curves (log
-// exposure -> negative density, where exposure in stops is applied), LUT_P (negative density ->
-// display code, where the printer lights live).
+// a few table lookups. Five stages: LUT_E (DI code -> exposure, stored as log10(E + eps)), three 1D
+// negative curves (log exposure -> negative density; the Exposure control is applied just before),
+// LUT_PE (negative density -> exposure on the print, no printer lights), three 1D print curves
+// (print log exposure -> print density; the printer lights and Print Density are added just before),
+// LUT_D (print density -> display code).
 #pragma once
 
 #include <array>
@@ -52,19 +54,23 @@ struct Curve1D {
 constexpr double kExposureLutEps = 1e-3;
 
 struct BakedFilm {
-  Lut3D lutE;                       // DI [0,1]^3 -> log10(E + kExposureLutEps), E = 10^logE
-  std::array<Curve1D, 3> negCurves;  // log E over [curve min - 1, curve max + 1] -> Status M density
-  Lut3D lutP;                       // reachable negative density (per-channel domain) -> display code
+  Lut3D lutE;                         // DI [0,1]^3 -> log10(E + kExposureLutEps), E = 10^logE
+  std::array<Curve1D, 3> negCurves;   // log E over [curve min - 1, curve max + 1] -> Status M density
+  Lut3D lutPE;                        // neg Status M density (reachable domain) -> print log E, zero offsets
+  std::array<Curve1D, 3> printCurves; // print log E over [print curve min - 1, max + 1] -> Status A density
+  Lut3D lutD;                         // print density over [printDensityRange -/+ 0.02, floor 0] -> display code
+  Vec3 balance;                       // auto-balance offsets (log E)
 };
 
-// Default sizes (113^3 exposure, 97^3 print) were chosen to keep baked-vs-direct error under
-// 0.4 dE2000 on 2000 random look-ups; 65^3 reached 0.65. Holds no reference to `model` afterwards.
-std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE = 113, int lutSizeP = 97);
+// Default sizes were chosen to keep baked-vs-direct error under 0.5 dE2000 (see the accuracy tests).
+// Holds no reference to `model` afterwards.
+std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE = 113, int lutSizePE = 97,
+                                          int lutSizeD = 129);
 
 // Keeps the last 4 looks so returning to a recent look does not rebake. A bake runs outside the
 // lock and is shared: other threads asking for the same new look wait for it, while threads asking
-// for an already-baked look are never blocked. A failed bake is thrown to all its waiters, then forgotten. Exposure is not
-// part of FilmParams (it is applied between the LUTs), so changing it never misses the cache.
+// for an already-baked look are never blocked. A failed bake is thrown to all its waiters, then forgotten. Exposure, printer
+// lights and Print Density are not part of FilmParams (applied per pixel between the tables), so changing them never misses the cache.
 class FilmCache {
  public:
   explicit FilmCache(std::shared_ptr<const FilmResources> resources);

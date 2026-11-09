@@ -13,7 +13,7 @@ namespace {
 inline float sane(float v) { return std::isfinite(v) ? v : 0.f; }
 
 void renderRows(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const BakedFilm& film,
-                float gain, int yBegin, int yEnd) {
+                float gain, const float off[3], int yBegin, int yEnd) {
   for (int y = yBegin; y < yEnd; ++y) {
     for (int x = win.x1; x < win.x2; ++x) {
       float* out = pixelAddress(dst, x, y);
@@ -30,7 +30,13 @@ void renderRows(const ConstImageView& src, const ImageView& dst, const RenderWin
       for (int c = 0; c < 3; ++c) le[c] = std::log10(std::max((std::pow(10.f, e[c]) - float(kExposureLutEps)) * gain, 1e-30f));
       const float d[3] = {film.negCurves[0].eval(le[0]), film.negCurves[1].eval(le[1]),
                           film.negCurves[2].eval(le[2])};
-      const auto o = film.lutP.lookup(d[0], d[1], d[2]);
+      // Negative density -> exposure on the print; the lab's balance, printer lights and Print
+      // Density shift it (a printer point is a fixed step of print exposure); the print's curves give
+      // dye density; the projected dyes give the display colour.
+      const auto pe = film.lutPE.lookup(d[0], d[1], d[2]);
+      const float pd[3] = {film.printCurves[0].eval(pe[0] + off[0]), film.printCurves[1].eval(pe[1] + off[1]),
+                           film.printCurves[2].eval(pe[2] + off[2])};
+      const auto o = film.lutD.lookup(pd[0], pd[1], pd[2]);
       out[0] = o[0];
       out[1] = o[1];
       out[2] = o[2];
@@ -41,19 +47,23 @@ void renderRows(const ConstImageView& src, const ImageView& dst, const RenderWin
 
 }  // namespace
 
+float exposureGain(double stops) {
+  if (!std::isfinite(stops)) return 1.f;
+  return float(std::exp2(std::clamp(stops, -64.0, 64.0)));
+}
+
 void renderFilmCpu(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const BakedFilm& film,
-                   double exposureStops) {
+                   const LookControls& controls) {
   const int rows = win.y2 - win.y1;
   if (rows <= 0 || win.x2 <= win.x1) return;
-  // A host can hand us NaN/inf for a keyframed value; treat it as 'no exposure change'.
-  if (!std::isfinite(exposureStops)) exposureStops = 0.0;
-  // Far beyond any real control range; keeps the gain finite so 0 x gain can never be NaN.
-  const float gain = float(std::exp2(std::clamp(exposureStops, -64.0, 64.0)));
+  const float gain = exposureGain(controls.exposureStops);
+  const Vec3 o = printOffsetsLogE(film.balance, controls);  // once per render, not per pixel
+  const float off[3] = {float(o[0]), float(o[1]), float(o[2])};
   const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, rows);
   std::vector<std::thread> pool;
   pool.reserve(size_t(threads));
   for (int t = 0; t < threads; ++t)
-    pool.emplace_back(renderRows, src, dst, win, std::cref(film), gain, win.y1 + rows * t / threads,
+    pool.emplace_back(renderRows, src, dst, win, std::cref(film), gain, off, win.y1 + rows * t / threads,
                       win.y1 + rows * (t + 1) / threads);
   for (auto& th : pool) th.join();
 }

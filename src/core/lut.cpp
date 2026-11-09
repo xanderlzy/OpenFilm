@@ -73,7 +73,7 @@ float Curve1D::eval(float x) const {
   return values[i] + (values[i + 1] - values[i]) * t;
 }
 
-std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, int lutSizeP) {
+std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, int lutSizePE, int lutSizeD) {
   Lut3D lutE(lutSizeE, {0, 0, 0}, {1, 1, 1}, true);
   // What the table stores matters. Raw log E is wrong near black: the black corner sits at the
   // 1e-10 floor (log E -10), and interpolating toward it pulls dark pixels far below the toe once
@@ -104,18 +104,45 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, 
     }
   }
 
-  // The print LUT only needs the densities the negative can actually produce (its curves'
-  // min..max per layer, plus a sliver of margin). Spending the nodes there instead of on the
-  // whole 0..4 cube makes the print LUT several times denser where it matters.
+  // LUT_PE only needs the densities the negative can actually produce (its curves' min..max per
+  // layer, plus a sliver of margin). Spending the nodes there instead of on the whole 0..4 cube
+  // makes the table several times denser where it matters. Output: exposure on each print layer
+  // with the printer lights at zero; the lab's balance and the user's lights are added per pixel.
   Vec3 dLo, dHi;
   for (size_t c = 0; c < 3; ++c) {
     const auto mm = std::minmax_element(curves[c].values.begin(), curves[c].values.end());
     dLo[c] = std::max(0.0, double(*mm.first) - 0.02);
     dHi[c] = double(*mm.second) + 0.02;
   }
-  Lut3D lutP(lutSizeP, dLo, dHi);
-  lutP.bake([&](const Vec3& d) { return model.printOutput(d, LookControls{}); });
-  return std::make_shared<const BakedFilm>(BakedFilm{std::move(lutE), std::move(curves), std::move(lutP)});
+  Lut3D lutPE(lutSizePE, dLo, dHi);
+  lutPE.bake([&](const Vec3& d) { return model.printLogExposureBase(d); });
+
+  // The print's H&D curves, one per layer, over the digitised range plus one log E of headroom so
+  // heavy printer-light offsets still land on the toe and shoulder plateaus (where they clamp).
+  std::array<Curve1D, 3> printCurves;
+  for (int c = 0; c < 3; ++c) {
+    const auto range = model.printLogERange(c);
+    Curve1D& cv = printCurves[size_t(c)];
+    cv.min = float(range[0] - 1);
+    cv.max = float(range[1] + 1);
+    cv.values.resize(kCurveSamples);
+    for (int i = 0; i < kCurveSamples; ++i) {
+      const double e = double(cv.min) + (double(cv.max) - double(cv.min)) * i / (kCurveSamples - 1);
+      cv.values[size_t(i)] = float(model.printDensity({e, e, e})[size_t(c)]);
+    }
+  }
+
+  // LUT_D: print dye density -> what the projected print looks like on a Rec.709 display.
+  Vec3 pLo, pHi;
+  for (int c = 0; c < 3; ++c) {
+    const auto range = model.printDensityRange(c);
+    pLo[size_t(c)] = std::max(0.0, range[0] - 0.02);
+    pHi[size_t(c)] = range[1] + 0.02;
+  }
+  Lut3D lutD(lutSizeD, pLo, pHi);
+  lutD.bake([&](const Vec3& d) { return model.displayFromPrintDensity(d); });
+  return std::make_shared<const BakedFilm>(
+      BakedFilm{std::move(lutE), std::move(curves), std::move(lutPE), std::move(printCurves), std::move(lutD), model.balance()});
 }
 
 FilmCache::FilmCache(std::shared_ptr<const FilmResources> resources) : res_(std::move(resources)) {}

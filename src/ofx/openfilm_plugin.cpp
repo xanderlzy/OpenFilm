@@ -156,9 +156,13 @@ public:
         fp.gamutCompression = gamutCompression_->getValueAtTime(args.time);
         try {
             const auto baked = film.cache->get(fp);  // re-bakes (~1.4 s) only when the look changed
+            openfilm::LookControls controls;  // applied per pixel, never rebaked
+            controls.exposureStops = exposureStops;
+            for (int i = 0; i < 3; ++i) controls.printerPoints[size_t(i)] = printerLight_[i]->getValueAtTime(args.time);
+            controls.printDensity = printDensity_->getValueAtTime(args.time);
             openfilm::renderFilmCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
                                     openfilm::ImageView{static_cast<float*>(dst->getPixelData()), dstGeom}, win,
-                                    *baked, exposureStops);
+                                    *baked, controls);
         } catch (const std::exception& e) {
             showError(std::string("OpenFilm: render failed: ") + e.what());
             OFX::throwSuiteStatusException(kOfxStatFailed);
