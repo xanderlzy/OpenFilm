@@ -138,6 +138,10 @@ void upAccumulate(const Image4f& small, Image4f& acc, int f, float weight) {
 
 }  // namespace
 
+std::vector<float> blurTaps(float sigmaPx) { return makeTaps(sigmaPx); }
+
+float reducedSigmaPx(float sigmaPx, int f) { return reducedSigma(sigmaPx, f); }
+
 int blurRadiusPx(float sigmaPx) { return sigmaPx < 0.25f ? 0 : int(std::ceil(3.f * sigmaPx)); }
 
 int downsampleFactor(float sigmaPx) {

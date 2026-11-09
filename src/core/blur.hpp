@@ -35,6 +35,11 @@ void gaussianBlur(const Image4f& in, Image4f& out, const std::array<float, 3>& s
 int spreadReachPx(const std::vector<PxLobe>& lobes);
 
 int blurRadiusPx(float sigmaPx);      // ceil(3 sigma); 0 when sigma < 0.25 (identity)
+// The normalised taps of one channel's blur, 2 * blurRadiusPx(sigmaPx) + 1 of them (computed in
+// double, stored as float). The GPU uploads exactly these.
+std::vector<float> blurTaps(float sigmaPx);
+// Sigma (coarse px) that, after the f x f box down and the bilinear up, gives sigmaPx at full resolution.
+float reducedSigmaPx(float sigmaPx, int f);
 int downsampleFactor(float sigmaPx);  // 1 if sigma <= 4, else largest power of two f <= 32 with sigma / f >= 2
 
 }  // namespace openfilm

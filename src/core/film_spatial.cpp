@@ -10,14 +10,6 @@ namespace openfilm {
 
 namespace {
 
-using detail::encodeDisplay;
-using detail::parallelRows;
-using detail::sane;
-
-constexpr int kBlockAlign = 32;  // largest downsampleFactor: wide lobes' block grid starts on it
-
-double fixed(double v, double def, double lo, double hi) { return std::isfinite(v) ? std::clamp(v, lo, hi) : def; }
-
 // Lobe width in px; anything not a positive finite number is "no spread" (0, copied by the blur).
 float pxSigma(double sigmaMm, double pxPerMm) {
   const double s = sigmaMm * pxPerMm;
@@ -33,13 +25,8 @@ std::vector<PxLobe> toPx(const std::vector<Lobe>& lobes, double pxPerMm) {
   return out;
 }
 
-// Per-layer scatter as passes: pass i blurs every channel with that layer's i-th lobe (weight 1);
-// layer c then takes weights[c][i] of pass i. Layers' lobes are sorted by sigma, so pass i pairs
-// like-sized lobes.
-struct LayerPasses {
-  std::vector<PxLobe> passes;
-  std::vector<std::array<float, 3>> weights;
-};
+}  // namespace
+
 LayerPasses layerPasses(const std::array<LayerSharpness, 3>& layers, double pxPerMm) {
   size_t n = 0;
   for (const auto& l : layers) n = std::max(n, l.scatter.size());
@@ -67,6 +54,24 @@ std::vector<PxLobe> edgeLobe(const std::array<LayerSharpness, 3>& layers, double
 std::vector<PxLobe> haloLobes(const FilmOptics& optics, const SpatialControls& s) {
   return toPx(halationLobes(optics.halation.baseThicknessMm, s.halationRadius), s.pxPerMm);
 }
+
+std::vector<PxLobe> bloomPxLobes(const SpatialControls& s) { return toPx(bloomLobes(s.bloomRadiusMm), s.pxPerMm); }
+
+std::array<float, 3> halationWeights(const FilmOptics& optics, const SpatialControls& s) {
+  const Halation& hal = optics.halation;
+  const double h = (s.remjet ? hal.reflectanceOn : hal.reflectanceOff) * s.halationStrength;
+  return {float(h * hal.layerSplit[0]), float(h * hal.layerSplit[1]), float(h * hal.layerSplit[2])};
+}
+
+namespace {
+
+using detail::encodeDisplay;
+using detail::parallelRows;
+using detail::sane;
+
+constexpr int kBlockAlign = 32;  // largest downsampleFactor: wide lobes' block grid starts on it
+
+double fixed(double v, double def, double lo, double hi) { return std::isfinite(v) ? std::clamp(v, lo, hi) : def; }
 
 int layerReach(const LayerPasses& lp) {
   int r = 0;
@@ -134,7 +139,7 @@ SpatialControls sanitize(SpatialControls s) {
 int spatialMarginPx(const FilmOptics& optics, const SpatialControls& controls) {
   const SpatialControls s = sanitize(controls);
   long long m = 0;
-  if (s.bloom) m += spreadReachPx(toPx(bloomLobes(s.bloomRadiusMm), s.pxPerMm));
+  if (s.bloom) m += spreadReachPx(bloomPxLobes(s));
   if (s.sharpness) m += layerReach(layerPasses(optics.negative, s.pxPerMm));
   if (s.halation) m += spreadReachPx(haloLobes(optics, s));
   if (s.sharpness) {
@@ -178,7 +183,7 @@ void exposureEffects(Image4f& E, const FilmOptics& optics, const SpatialControls
   const SpatialControls s = sanitize(controls);
   if (s.bloom) {
     Image4f blurred;
-    spread(E, blurred, toPx(bloomLobes(s.bloomRadiusMm), s.pxPerMm));
+    spread(E, blurred, bloomPxLobes(s));
     const float a = float(s.bloomAmount);
     parallelRows(E.height, [&](int y0, int y1) {
       for (int y = y0; y < y1; ++y)
@@ -188,16 +193,14 @@ void exposureEffects(Image4f& E, const FilmOptics& optics, const SpatialControls
   }
   if (s.sharpness) spreadLayers(E, optics.negative, s.pxPerMm);
   if (s.halation) {
-    const Halation& hal = optics.halation;
-    const double h = (s.remjet ? hal.reflectanceOn : hal.reflectanceOff) * s.halationStrength;
-    const float hw[3] = {float(h * hal.layerSplit[0]), float(h * hal.layerSplit[1]), float(h * hal.layerSplit[2])};
+    const std::array<float, 3> hw = halationWeights(optics, s);
     Image4f halo;
     spread(E, halo, haloLobes(optics, s));  // only its red channel is used: the red layer's light reaches the base
     parallelRows(E.height, [&](int y0, int y1) {
       for (int y = y0; y < y1; ++y)
         for (int x = 0; x < E.width; ++x) {
           const float r = halo.at(x, y)[0];
-          for (int c = 0; c < 3; ++c) E.at(x, y)[c] += hw[c] * r;
+          for (int c = 0; c < 3; ++c) E.at(x, y)[c] += hw[size_t(c)] * r;
         }
     });
   }

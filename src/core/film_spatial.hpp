@@ -47,6 +47,22 @@ WorkRect workRect(const ConstImageView& src, const RenderWindow& win, int margin
 void renderFilm(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const BakedFilm& film,
                 const LookControls& look, const SpatialControls& spatial);
 
+// ---- Lobes in pixels, exactly as the stages use them (the GPU host builds its passes from these).
+// `s` must already be sanitised. ----
+// Per-layer scatter as passes: pass i blurs every channel with that layer's i-th lobe (weight 1);
+// layer c then takes weights[i][c] of pass i. Layers' lobes are sorted by sigma, so pass i pairs
+// like-sized lobes.
+struct LayerPasses {
+  std::vector<PxLobe> passes;
+  std::vector<std::array<float, 3>> weights;
+};
+LayerPasses layerPasses(const std::array<LayerSharpness, 3>& layers, double pxPerMm);
+std::vector<PxLobe> edgeLobe(const std::array<LayerSharpness, 3>& layers, double pxPerMm);  // one lobe, weight 1
+std::vector<PxLobe> haloLobes(const FilmOptics& optics, const SpatialControls& s);
+std::vector<PxLobe> bloomPxLobes(const SpatialControls& s);
+// h * layerSplit_c, h = rem-jet reflectance x strength: what each layer gains from the halo of red.
+std::array<float, 3> halationWeights(const FilmOptics& optics, const SpatialControls& s);
+
 // ---- Stages (public for the tests and as the GPU's reference) ----
 // DI -> linear exposure: RGB = (10^lutE - eps) * gain, A = source alpha. Non-finite DI counts as 0.
 void exposeStage(const ConstImageView& src, const WorkRect& rect, const BakedFilm& film, float gain, Image4f& E);
