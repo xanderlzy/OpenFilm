@@ -76,7 +76,7 @@ add_test(NAME core COMMAND test_core)
 include(cmake/OpenFilmBundle.cmake)
 set(OPENFILM_METALLIB ${CMAKE_BINARY_DIR}/OpenFilm.metallib)
 openfilm_add_metallib(openfilm_metallib ${OPENFILM_METALLIB}
-  ${CMAKE_SOURCE_DIR}/src/metal/film.metal)
+  ${CMAKE_SOURCE_DIR}/src/metal/film.metal ${CMAKE_SOURCE_DIR}/src/metal/spatial.metal)
 
 add_library(openfilm_metal STATIC src/metal/metal_renderer.mm)
 target_link_libraries(openfilm_metal PUBLIC openfilm_core "-framework Metal" "-framework Foundation")

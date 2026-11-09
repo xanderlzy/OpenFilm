@@ -8,6 +8,7 @@
 // void* and the Metal details stay hidden in metal_renderer.mm.
 #pragma once
 
+#include "core/film_spatial.hpp"
 #include "core/image.hpp"
 #include "core/lut.hpp"
 
@@ -35,6 +36,14 @@ public:
     bool render(void* commandQueue, void* srcBuffer, const ImageGeometry& srcGeom, void* dstBuffer,
                 const ImageGeometry& dstGeom, const RenderWindow& win, const std::shared_ptr<const BakedFilm>& film,
                 const LookControls& controls);
+
+    // The M4 path: the GPU twin of renderFilm() (film_spatial.hpp), pass for pass. Calls the overload
+    // above unchanged when !spatial.anyOn(). Otherwise works on the window grown by
+    // spatialMarginPx (cut to the source, see workRect) in pooled GPU buffers that go back to the
+    // pool when the command buffer completes. Commits without waiting. Thread-safe.
+    bool render(void* commandQueue, void* srcBuffer, const ImageGeometry& srcGeom, void* dstBuffer,
+                const ImageGeometry& dstGeom, const RenderWindow& win, const std::shared_ptr<const BakedFilm>& film,
+                const LookControls& look, const SpatialControls& spatial);
 
     // Number of film table sets currently held on the GPU (for tests).
     size_t cachedFilmCount() const;

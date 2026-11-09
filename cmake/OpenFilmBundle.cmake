@@ -19,7 +19,7 @@ function(openfilm_add_metallib target out)
               -I ${CMAKE_SOURCE_DIR}/src
               -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}
               -o ${air}
-      DEPENDS ${src} ${CMAKE_SOURCE_DIR}/src/metal/shader_types.h
+      DEPENDS ${src} ${CMAKE_SOURCE_DIR}/src/metal/shader_types.h ${CMAKE_SOURCE_DIR}/src/metal/film_common.h
       COMMENT "Compiling Metal shader ${name}.metal"
       VERBATIM)
     list(APPEND airs ${air})
