@@ -64,9 +64,9 @@ projector → screen.**
 | Print | Print density | -20 to +20 points (0) | Points added to all three lights together: overall printing density. |
 | Film format | Format | list (Super 35) | Gate width of the film the picture is laid onto: Super 35 (24.89 mm), 35mm Academy (21.95 mm), Super 16 (12.52 mm), 16mm (10.26 mm), 65mm 5-perf (52.48 mm) or Custom. It sets the real size, in millimetres, of every effect below. |
 | Film format | Gate width (mm) | 5 to 80 (24.89) | Only active when Format is Custom. |
-| Sharpness | Enable | on | Emulsion light scatter and development edge effects, in the negative and in the print. |
+| Sharpness | Enable | on | Emulsion light scatter in the negative and the print, and the negative's development edge effect. |
 | Halation | Enable | on | Light that passes through the emulsion, bounces off the back of the film base and exposes the layers again. |
-| Halation | Rem-jet | on | On: the stock's anti-halation backing is present (faint halo). Off: the backing is removed, as in a bleached or "ECN-2 prep skipped" look (strong red glow). |
+| Halation | Rem-jet | on | On: the stock's anti-halation backing is present (faint halo). Off: the backing was removed before exposure, CineStill-style (strong red glow). |
 | Halation | Strength | 0 to 5 (1) | 1 is the physical amount; above 1 is for taste. |
 | Halation | Radius | 0.25 to 4 (1) | Multiplier on the physical radius. |
 | Bloom | Enable | off | In-camera diffusion (lens or diffusion filter) before the light reaches the negative. |
@@ -84,7 +84,8 @@ These effects act in the place of the chain where they happen in real film, not 
 finished picture. Sizes are in millimetres on the film, so the **Format** menu matters: the same
 halo is a bigger part of a Super 16 frame than of a Super 35 one, and a 65mm frame is cleaner.
 Switching format changes how big these effects are, not how the colour looks. With all three
-effects off, the picture is exactly what Milestone 3 gave you.
+effects off, you get the colour-only path. Since Milestone 4 that path reads the exposure table at half
+precision, at most 0.444 dE2000 from the direct model (see "Exposure table precision" below).
 
 * **Bloom** (optional, off by default) happens first, in front of the negative: some of the scene
   light is spread by a diffusion filter or lens. It acts on exposure, so bright highlights bloom
@@ -95,21 +96,25 @@ effects off, the picture is exactly what Milestone 3 gave you.
   bite. Both are fitted to the datasheet's MTF (sharpness versus detail size) curves.
 * **Halation** acts on the exposure too. Light that gets through the emulsion reflects off the back
   of the film base and re-exposes the layers around the bright spot. The returned light is red
-  because only the red layer sits deepest and is lit most by it, so highlights get a red-orange
+  because the red-sensitive layer is the deepest, nearest the base, and is the one that light
+  mostly reaches, so highlights get a red-orange
   halo. With Rem-jet on, the dark backing absorbs nearly all of it (about 1 % comes back); with
   it off, much more does (about 29 %), giving the classic glow.
-* **Sharpness, print.** The print film scatters light again (three scatter lobes rather than two),
-  and develops its own edge effect. This one acts in the print's density, which is why the 2383
-  sharpness curves rise above 100 %.
+* **Sharpness, print.** The print film scatters light again (three scatter lobes rather than two).
+  The print is modelled as scatter only, with no edge effect of its own. A fitted print edge effect
+  put a wide green-tinted halo (about 120 px at UHD) on every mid-contrast edge, so it was left out.
 
 ### What is measured and what is assumed
 
-* **Fitted to data.** The scatter lobes and edge effect come from the digitised datasheet MTF
-  curves. The worst point of each fit, in response units (1.0 = 100 %): 5219 red 0.017, green
-  0.022, blue 0.007; 2383 red 0.009, green 0.046, blue 0.010.
-* **Limits on the edge effect.** The print has three scatter lobes plus an edge effect in print
-  density. The edge reach is capped at 0.5 mm and the edge gain at 0.3: larger values cancelled
-  the dip only on sine-wave test targets and would put a visible fringe on real edges.
+* **Fitted to data.** The scatter lobes (and the negative's edge effect) come from the digitised
+  datasheet MTF curves. The worst point of each fit, in response units (1.0 = 100 %): 5219 red
+  0.017, green 0.022, blue 0.007; 2383 red 0.065, green 0.075, blue 0.072.
+* **Why the print fit is looser.** The worst 2383 points are all at the lowest frequency
+  (2.54 cycles/mm), where the datasheet curves sit 5-6 % above 100 %. Scatter alone can't go above
+  100 %, so the print can't reach those points. Past them the fit follows the curves closely.
+* **Limits on the negative's edge effect.** The edge reach is capped at 0.5 mm and the edge gain at
+  0.3. Larger values only cancelled the dip on sine-wave test targets and would put a visible fringe
+  on real edges.
 * **Assumed, not published.** No manufacturer publishes halation values, so these are assumptions:
   the base is 0.127 mm acetate (the datasheet says acetate base with a rem-jet backing); the light
   returned is 1 % with rem-jet and 29 % without; and how the halo is shared between the layers is
@@ -201,10 +206,11 @@ review images generated in `build/digitize-review/`.
 * **Extreme Exposure.** Beyond +/-5 stops, the deepest shadows are checked less tightly.
 * **GPU versus CPU reference.** They agree within 1/1000 of a code value (measured 0.00008).
 * **Speed.** The colour path alone takes about 4 ms per UHD frame on an M4 Pro for normal footage.
-  With every effect on, UHD takes about **19.6 ms** (median, on a pure-noise frame, the hard case),
-  which is real time at 24 fps. While rendering, one UHD frame uses about 530 MB of GPU memory;
-  one idle set is kept so the next frame starts fast, and it can be released if the system needs
-  memory.
+  With every effect on, UHD takes about **19.0-19.9 ms** depending on load (median, on a pure-noise
+  frame, the hard case; the target is 20 ms), which is real time at 24 fps. While rendering, one UHD
+  frame uses about 500 MB of GPU memory. At most three frames' worth are in use at once (a fourth
+  frame waits for one to finish). Spare sets are kept so the next frame starts fast. All but one
+  are released after a second of idling, and the system can reclaim any of them if it needs memory.
 * **Exposure table precision.** The exposure table is stored rounded to half precision on both the
   CPU and the GPU; against the direct model the worst difference is **0.444 dE2000**.
 

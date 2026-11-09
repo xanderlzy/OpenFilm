@@ -93,9 +93,11 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, 
     for (size_t c = 0; c < 3; ++c) q[c] = std::log10(std::pow(10.0, logE[c]) + kExposureLutEps);
     return q;
   });
-  // Half precision (a log10 step of at most 2^-10 near the top of the range, 0.23 % in E) keeps the
-  // table within the 0.5 dE2000 budget and halves its size on the GPU (12.9 MB instead of 25.8 MB),
-  // where random-access footage reads it from all over memory.
+  // Rounded to half precision (a log10 step of at most 2^-10 near the top of the range, 0.23 % in E),
+  // which stays within the 0.5 dE2000 budget, so the GPU's spatial path can read a half copy padded
+  // to four channels: one 8-byte load per node, for footage that reads the table from all over
+  // memory. This does not save GPU memory: the GPU keeps the float table for the colour-only kernel
+  // as well as the padded half copy, so table memory rose.
   lutE.roundToHalf();
 
   std::array<Curve1D, 3> curves;
