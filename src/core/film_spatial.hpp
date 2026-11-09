@@ -2,14 +2,20 @@
 // the development edge effect on the negative density, scatter on the print (no print edge effect:
 // ruling R14). The
 // M3 colour chain is split into stages so each effect acts in the domain where it happens. This is
-// the reference the Metal path mirrors pass for pass.
+// the reference the Metal path mirrors pass for pass. Grain (M5) adds dye-cloud noise to the
+// negative and the print density.
 #pragma once
 
+#include <cstdint>
+
 #include "core/blur.hpp"
+#include "core/grain_sim.hpp"
 #include "core/image.hpp"
 #include "core/lut.hpp"
 
 namespace openfilm {
+
+enum class GrainQuality { Preview, Full };
 
 struct SpatialControls {
   bool sharpness = true;  // scatter on negative and print, edge effect on the negative
@@ -21,8 +27,17 @@ struct SpatialControls {
   double bloomAmount = 0.25;   // 0..1
   double bloomRadiusMm = 0.5;  // 0.05..5 mm on the film
   double pxPerMm = 3840 / 24.89;  // image width (px, at the current render scale) / gate width (mm)
-  bool anyOn() const { return sharpness || halation || bloom; }
+  bool grain = false;  // core default off (M4 path); the OFX default is on
+  double grainAmount = 1;  // 0..3, multiplies the datasheet rms
+  double grainSize = 1;    // 0.5..2, multiplies the cloud radius
+  GrainQuality grainQuality = GrainQuality::Preview;
+  uint32_t frameSeed = 0;  // frameSeedFromTime(time): new clouds every frame, the same ones on a re-render
+  bool grainOn() const { return grain && grainAmount > 0; }
+  bool anyOn() const { return sharpness || halation || bloom || grainOn(); }
 };
+
+// Seed of a frame's grain: a hash of the bits of the host's time.
+uint32_t frameSeedFromTime(double time);
 
 // Non-finite values -> default; values clamped to the control ranges above; pxPerMm <= 0 or
 // non-finite -> default, and capped at 1e4 px/mm so kernel sizes stay representable.
@@ -43,7 +58,7 @@ struct WorkRect {
 };
 WorkRect workRect(const ConstImageView& src, const RenderWindow& win, int marginPx);
 
-// Calls renderFilmCpu when !spatial.anyOn() (bit-identical to M3); otherwise runs the stages below.
+// Calls renderFilmCpu when !sanitize(spatial).anyOn() (bit-identical to M3); otherwise runs the stages below.
 // Same window, alpha and NaN rules as renderFilmCpu.
 void renderFilm(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const BakedFilm& film,
                 const LookControls& look, const SpatialControls& spatial);
@@ -74,6 +89,12 @@ void exposureEffects(Image4f& E, const FilmOptics& optics, const SpatialControls
 void developStage(Image4f& EtoD, const BakedFilm& film);
 // Negative edge effect (if sharpness): D_c <- D_c + k_c (D_c - G_{sigmaA,c} * D_c).
 void edgeEffect(Image4f& D, const FilmOptics& optics, const SpatialControls& s);
+// Grain on the negative (st = Negative, after the edge effect) or on the print density (st = Print,
+// after print development): D_c += Amount * a_c(D_c) * u_c, a from grainTables(film.grain, Size), u the
+// layer's grainUnit at frame pixel (rect.x1 + i, rect.y1 + j) for work pixel (i, j), seeded by
+// grainSeed(frameSeed, st, c). Non-finite D_c unchanged. No-op when !s.grainOn() or !film.grain.valid.
+// Reads no neighbours (adds nothing to spatialMarginPx). Full quality for either GrainQuality (ruling R2).
+void grainStage(Image4f& D, const WorkRect& rect, const BakedFilm& film, const SpatialControls& s, GrainStage st);
 // Negative density -> linear print exposure P = 10^lutPE(D).
 void printExposeStage(Image4f& DtoP, const BakedFilm& film);
 // Print scatter (if sharpness): P_c <- spread_c(P, print[c].scatter).

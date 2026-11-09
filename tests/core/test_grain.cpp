@@ -1,0 +1,506 @@
+// Tests for Full grain on the CPU (ruling R3, additive dye clouds): grain off is M4, the measured
+// 48 um rms against the datasheet, mean density, per-frame seeds, format and Size scaling of the
+// texture, sub-windows and non-finite densities.
+#include <doctest/doctest.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <random>
+
+#include "core/color.hpp"
+#include "core/film_renderer.hpp"
+#include "core/film_spatial.hpp"
+#include "core/grain_sim.hpp"
+
+using namespace openfilm;
+
+namespace {
+const std::string kData = OPENFILM_SOURCE_DATA_DIR;
+constexpr double kUhdS35 = 3840 / 24.89;  // UHD Super 35 px/mm
+constexpr double kApertureMm = 0.048;     // the datasheet's rms aperture diameter
+
+std::shared_ptr<const FilmResources> res() {
+  static const auto r = FilmResources::load(kData, OPENFILM_COEFF_PATH);
+  return r;
+}
+const BakedFilm& film() {
+  static const auto f = [] {
+    FilmParams p;
+    p.negativeId = "kodak-5219-type";
+    p.printId = "kodak-2383-type";
+    return bakeFilm(FilmModel(res(), p));
+  }();
+  return *f;
+}
+
+struct TestImage {
+  ImageGeometry geom;
+  std::vector<unsigned char> bytes;
+  TestImage(ImageGeometry g, float fill) : geom(g), bytes(size_t(g.rowBytes) * size_t(g.y2 - g.y1)) {
+    float* f = reinterpret_cast<float*>(bytes.data());
+    for (size_t i = 0; i < bytes.size() / sizeof(float); ++i) f[i] = fill;
+  }
+  ImageView view() { return {reinterpret_cast<float*>(bytes.data()), geom}; }
+  ConstImageView cview() const { return {reinterpret_cast<const float*>(bytes.data()), geom}; }
+  float* at(int x, int y) { return pixelAddress(view(), x, y); }
+};
+ImageGeometry tight(int x1, int y1, int x2, int y2) {
+  return {x1, y1, x2, y2, std::ptrdiff_t(x2 - x1) * 4 * std::ptrdiff_t(sizeof(float))};
+}
+
+void fillRandom(TestImage& img, unsigned seed, bool specials) {
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> u(-0.1f, 1.1f);
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  for (int y = img.geom.y1; y < img.geom.y2; ++y)
+    for (int x = img.geom.x1; x < img.geom.x2; ++x) {
+      float* p = img.at(x, y);
+      for (int c = 0; c < 3; ++c) p[c] = u(rng);
+      p[3] = float(rng() % 1000) / 999.f;
+      if (specials && rng() % 23 == 0) p[rng() % 3] = (rng() % 2) ? nan : -inf;
+    }
+}
+
+SpatialControls effects(bool on) {
+  SpatialControls s;
+  s.sharpness = s.halation = s.bloom = on;
+  s.remjet = false;
+  s.pxPerMm = kUhdS35;
+  return s;
+}
+SpatialControls grainOnly(double pxPerMm = kUhdS35, uint32_t frameSeed = 1) {
+  SpatialControls s = effects(false);
+  s.grain = true;
+  s.grainQuality = GrainQuality::Full;  // ruling R2
+  s.pxPerMm = pxPerMm;
+  s.frameSeed = frameSeed;
+  return s;
+}
+
+Image4f uniform(int w, int h, std::array<float, 3> d) {
+  Image4f img;
+  img.width = w;
+  img.height = h;
+  img.px.resize(size_t(w) * size_t(h) * 4);
+  for (size_t i = 0; i < img.px.size(); i += 4) {
+    for (size_t c = 0; c < 3; ++c) img.px[i + c] = d[c];
+    img.px[i + 3] = 1.f;
+  }
+  return img;
+}
+
+const std::array<GrainLayer, 3>& layersOf(GrainStage st) {
+  return st == GrainStage::Negative ? film().grain.negative : film().grain.print;
+}
+
+// grainStage on a uniform patch; returns the deviation field of channel c (output minus input).
+std::vector<double> deviation(const Image4f& in, const SpatialControls& s, GrainStage st, int c) {
+  Image4f out = in;
+  grainStage(out, {0, 0, in.width, in.height}, film(), s, st);
+  std::vector<double> v(size_t(in.width) * size_t(in.height));
+  for (int y = 0; y < in.height; ++y)
+    for (int x = 0; x < in.width; ++x)
+      v[size_t(y) * size_t(in.width) + size_t(x)] = double(out.at(x, y)[c]) - double(in.at(x, y)[c]);
+  return v;
+}
+
+// Std of the means over discs of diameter `diamPx` (pixels whose centres are inside), the discs on a
+// grid one diameter (+1 px) apart so their means are independent.
+double discMeanStd(const std::vector<double>& v, int w, int h, double diamPx) {
+  const double r = diamPx / 2;
+  const int reach = int(std::ceil(r)), step = int(std::ceil(diamPx)) + 1;
+  std::vector<double> means;
+  for (int cy = reach; cy + reach < h; cy += step)
+    for (int cx = reach; cx + reach < w; cx += step) {
+      double sum = 0;
+      int n = 0;
+      for (int y = cy - reach; y <= cy + reach; ++y)
+        for (int x = cx - reach; x <= cx + reach; ++x)
+          if (double(x - cx) * (x - cx) + double(y - cy) * (y - cy) <= r * r) {
+            sum += v[size_t(y) * size_t(w) + size_t(x)];
+            ++n;
+          }
+      means.push_back(sum / n);
+    }
+  double s = 0, s2 = 0;
+  for (double m : means) { s += m; s2 += m * m; }
+  const double mean = s / double(means.size());
+  return std::sqrt(std::max(0.0, s2 / double(means.size()) - mean * mean));
+}
+
+// Lag (px) where a correlation curve corr(lag), lag = 0, 1, ..., falls to half of corr(0), linearly
+// interpolated between integer lags.
+template <class Corr>
+double halfMaxLag(Corr corr, int maxLag) {
+  const double c0 = corr(0);
+  double prev = 1;
+  for (int lag = 1; lag < maxLag; ++lag) {
+    const double c = corr(lag) / c0;
+    if (c <= 0.5) return lag - 1 + (prev - 0.5) / (prev - c);
+    prev = c;
+  }
+  return std::numeric_limits<double>::infinity();
+}
+
+// Half-max radius of the field's measured autocorrelation (x and y lags averaged).
+double halfMaxRadius(const std::vector<double>& v, int w, int h) {
+  double mean = 0;
+  for (double x : v) mean += x;
+  mean /= double(v.size());
+  return halfMaxLag(
+      [&](int lag) {
+        double s = 0;
+        long long n = 0;
+        for (int y = 0; y + lag < h; ++y)
+          for (int x = 0; x + lag < w; ++x) {
+            const double a = v[size_t(y) * size_t(w) + size_t(x)] - mean;
+            s += a * (v[size_t(y) * size_t(w) + size_t(x + lag)] - mean) + a * (v[size_t(y + lag) * size_t(w) + size_t(x)] - mean);
+            n += 2;
+          }
+        return s / double(n);
+      },
+      std::min(w, h) / 2);
+}
+
+// The same half-max radius predicted exactly by the model: a pixel value is the mean of u over its
+// 4 x 4 sub-samples and u's covariance between two points is unitCovariance(distance), so two pixels
+// `lag` apart have covariance (1/256) sum over sub-sample pairs. The pixel footprint is fixed while
+// the clouds scale, so this is not exactly proportional to the cloud radius at a few px.
+double predictedHalfMaxRadius(const GrainLayer& g, double pxPerMm, double sizeMul) {
+  return halfMaxLag(
+      [&](int lag) {
+        double s = 0;
+        for (int di = -3; di <= 3; ++di)
+          for (int dj = -3; dj <= 3; ++dj)
+            s += (4 - std::abs(di)) * (4 - std::abs(dj)) *
+                 g.unitCovariance(std::hypot(lag + di / 4.0, dj / 4.0) / pxPerMm, sizeMul);
+        return s / 256;
+      },
+      100000);
+}
+
+double correlation(const std::vector<double>& a, const std::vector<double>& b) {
+  double ma = 0, mb = 0;
+  for (size_t i = 0; i < a.size(); ++i) { ma += a[i]; mb += b[i]; }
+  ma /= double(a.size());
+  mb /= double(b.size());
+  double sab = 0, saa = 0, sbb = 0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    sab += (a[i] - ma) * (b[i] - mb);
+    saa += (a[i] - ma) * (a[i] - ma);
+    sbb += (b[i] - mb) * (b[i] - mb);
+  }
+  return sab / std::sqrt(saa * sbb);
+}
+}  // namespace
+
+TEST_CASE("grain off or amount 0 is M4") {
+  REQUIRE(film().grain.valid);
+  const int w = 97, h = 61;
+  TestImage src(tight(0, 0, w, h), 0.f);
+  fillRandom(src, 7, true);
+  const RenderWindow win{5, 7, 80, 50};
+  LookControls look;
+  look.exposureStops = 0.4;
+  for (bool on : {true, false}) {
+    const SpatialControls m4 = effects(on);
+    TestImage ref(tight(0, 0, w, h), 7.f);
+    renderFilm(src.cview(), ref.view(), win, film(), look, m4);
+    SpatialControls off = grainOnly();
+    off.sharpness = off.halation = off.bloom = on;
+    off.grain = false;
+    SpatialControls zero = off;
+    zero.grain = true;
+    zero.grainAmount = 0;
+    for (const SpatialControls& s : {off, zero}) {
+      TestImage out(tight(0, 0, w, h), 7.f);
+      renderFilm(src.cview(), out.view(), win, film(), look, s);
+      CHECK(std::memcmp(out.bytes.data(), ref.bytes.data(), out.bytes.size()) == 0);
+    }
+  }
+  // And grain on really changes the render.
+  TestImage ref(tight(0, 0, w, h), 7.f), grainy(tight(0, 0, w, h), 7.f);
+  renderFilm(src.cview(), ref.view(), win, film(), look, effects(false));
+  renderFilm(src.cview(), grainy.view(), win, film(), look, grainOnly());
+  CHECK(std::memcmp(grainy.bytes.data(), ref.bytes.data(), ref.bytes.size()) != 0);
+}
+
+TEST_CASE("measured grain matches the datasheet") {
+  const int n = 512;
+  const double diamPx = kApertureMm * kUhdS35;
+  for (GrainStage st : {GrainStage::Negative, GrainStage::Print}) {
+    const auto& layers = layersOf(st);
+    size_t points = 0;
+    for (const auto& g : layers) points = std::max(points, g.density.size());
+    std::array<double, 3> worst{}, worstD{};
+    for (size_t k = 0; k < points; ++k) {
+      // Each channel at its own layer's k-th digitised density (the last one again once a layer runs out).
+      std::array<float, 3> d{};
+      for (size_t c = 0; c < 3; ++c) d[c] = float(layers[c].density[std::min(k, layers[c].density.size() - 1)]);
+      const Image4f in = uniform(n, n, d);
+      Image4f out = in;
+      grainStage(out, {0, 0, n, n}, film(), grainOnly(kUhdS35, uint32_t(k + 1)), st);
+      for (int c = 0; c < 3; ++c) {
+        if (k >= layers[size_t(c)].density.size()) continue;
+        std::vector<double> v(size_t(n) * size_t(n));
+        for (int y = 0; y < n; ++y)
+          for (int x = 0; x < n; ++x) v[size_t(y) * n + size_t(x)] = double(out.at(x, y)[c]) - double(d[size_t(c)]);
+        const double measured = discMeanStd(v, n, n, diamPx), want = layers[size_t(c)].sigma[k];
+        const double e = std::abs(measured / want - 1);
+        if (!(e <= worst[size_t(c)])) { worst[size_t(c)] = std::isfinite(e) ? e : 1e9; worstD[size_t(c)] = d[size_t(c)]; }
+      }
+    }
+    const char* names[3] = {"red", "green", "blue"};
+    for (int c = 0; c < 3; ++c) {
+      const std::string label = std::string(st == GrainStage::Negative ? "negative " : "print ") + names[c];
+      MESSAGE(label << ": worst |measured/datasheet - 1| " << worst[size_t(c)] << " at D " << worstD[size_t(c)]);
+      CHECK(worst[size_t(c)] <= 0.15);
+    }
+  }
+}
+
+TEST_CASE("grain keeps mean density") {
+  const int n = 1024;
+  for (GrainStage st : {GrainStage::Negative, GrainStage::Print}) {
+    const auto& layers = layersOf(st);
+    for (double t : {0.25, 0.75}) {
+      std::array<float, 3> d{};
+      for (size_t c = 0; c < 3; ++c)
+        d[c] = float(layers[c].density.front() + t * (layers[c].density.back() - layers[c].density.front()));
+      const Image4f in = uniform(n, n, d);
+      Image4f out = in;
+      grainStage(out, {0, 0, n, n}, film(), grainOnly(kUhdS35, 5), st);
+      for (int c = 0; c < 3; ++c) {
+        double sum = 0;
+        for (int y = 0; y < n; ++y)
+          for (int x = 0; x < n; ++x) sum += double(out.at(x, y)[c]) - double(d[size_t(c)]);
+        const double shift = sum / (double(n) * n);
+        INFO("stage " << int(st) << " layer " << c << " D " << d[size_t(c)] << " mean shift " << shift);
+        CHECK(std::abs(shift) <= 0.005);
+      }
+    }
+  }
+}
+
+TEST_CASE("grain changes every frame and repeats per frame") {
+  const int n = 256;
+  const Image4f in = uniform(n, n, {1.f, 1.2f, 1.4f});
+  const double t = 3600.5;
+  const uint32_t a = frameSeedFromTime(t), b = frameSeedFromTime(t + 1.0 / 24);
+  CHECK(a != b);
+  CHECK(frameSeedFromTime(t) == a);
+  for (GrainStage st : {GrainStage::Negative, GrainStage::Print})
+    for (int c = 0; c < 3; ++c) {
+      const auto va = deviation(in, grainOnly(kUhdS35, a), st, c);
+      CHECK(va == deviation(in, grainOnly(kUhdS35, a), st, c));
+      const double r = correlation(va, deviation(in, grainOnly(kUhdS35, b), st, c));
+      INFO("stage " << int(st) << " layer " << c << " frame-to-frame correlation " << r);
+      CHECK(std::abs(r) < 0.05);
+    }
+  // The three layers and the two stages draw different clouds.
+  CHECK(grainSeed(a, GrainStage::Negative, 0) != grainSeed(a, GrainStage::Negative, 1));
+  CHECK(grainSeed(a, GrainStage::Negative, 0) != grainSeed(a, GrainStage::Print, 0));
+}
+
+// The brief's bar (half-max radius ratio 2 +-5 % between 600 and 1200 px/mm) cannot hold as written:
+// the measured autocorrelation includes the pixel footprint, which does not scale with the format
+// (about +0.25 px on the radius at any scale; ratio ~1.88 between r = 3 and 6 px, exactly as the
+// model predicts). So: at 600 and 1200 px/mm the measured radius matches the model's exact pixel-
+// sampled prediction within 3 %, and the 2x ratio is checked at 1200 / 2400 px/mm (r = 6 / 12 px),
+// where the footprint is small. The patch grows with the clouds (512 px at r = 3 px) so every
+// estimate sees as many clouds.
+TEST_CASE("grain format scaling") {
+  for (int c = 0; c < 3; ++c) {
+    const GrainLayer& g = film().grain.negative[size_t(c)];
+    double r[3];
+    const double px[3] = {600, 1200, 2400};
+    for (int k = 0; k < 3; ++k) {
+      const int n = 512 << k;
+      r[k] = halfMaxRadius(deviation(uniform(n, n, {1.f, 1.2f, 1.4f}), grainOnly(px[k]), GrainStage::Negative, c), n, n);
+      const double want = predictedHalfMaxRadius(g, px[k], 1);
+      MESSAGE("negative layer " << c << " at " << px[k] << " px/mm: autocorrelation half-max radius " << r[k]
+                                << " px, model " << want << " px");
+      if (k < 2) CHECK(std::abs(r[k] / want - 1) <= 0.03);
+    }
+    MESSAGE("negative layer " << c << ": ratio 1200/600 " << r[1] / r[0] << ", 2400/1200 " << r[2] / r[1]);
+    CHECK(std::abs(r[2] / r[1] / 2 - 1) <= 0.05);
+  }
+}
+
+// Radius at 1200 px/mm (clouds 6 -> 12 px, patch 1024 -> 2048 px; see the note on format scaling),
+// the 48 um rms at UHD Super 35, the production scale.
+TEST_CASE("grain size") {
+  for (int c = 0; c < 3; ++c) {
+    const GrainLayer& g = film().grain.negative[size_t(c)];
+    SpatialControls s1 = grainOnly(1200, 3), s2 = s1;
+    s2.grainSize = 2;
+    const double r1 = halfMaxRadius(deviation(uniform(1024, 1024, {1.f, 1.2f, 1.4f}), s1, GrainStage::Negative, c), 1024, 1024);
+    const double r2 = halfMaxRadius(deviation(uniform(2048, 2048, {1.f, 1.2f, 1.4f}), s2, GrainStage::Negative, c), 2048, 2048);
+    const double want2 = predictedHalfMaxRadius(g, 1200, 2);
+    s1.pxPerMm = s2.pxPerMm = kUhdS35;
+    const int n = 1024;
+    const double diamPx = kApertureMm * kUhdS35;
+    const Image4f big = uniform(n, n, {1.f, 1.2f, 1.4f});
+    const double rms1 = discMeanStd(deviation(big, s1, GrainStage::Negative, c), n, n, diamPx);
+    const double rms2 = discMeanStd(deviation(big, s2, GrainStage::Negative, c), n, n, diamPx);
+    MESSAGE("negative layer " << c << ": half-max radius " << r1 << " -> " << r2 << " px (ratio " << r2 / r1
+                              << ", model at Size 2 " << want2 << "), 48 um rms " << rms1 << " -> " << rms2
+                              << " (ratio " << rms2 / rms1 << ")");
+    CHECK(std::abs(r2 / r1 / 2 - 1) <= 0.05);
+    CHECK(std::abs(r2 / want2 - 1) <= 0.03);
+    CHECK(std::abs(rms2 / rms1 - 1) <= 0.10);
+  }
+  // Print at Size 0.5: 2 um clouds become 0.15 px, the sub-pixel Gaussian path; the rms must hold too.
+  const int n = 1024;
+  const double diamPx = kApertureMm * kUhdS35;
+  const Image4f big = uniform(n, n, {1.f, 1.2f, 1.4f});
+  for (int c = 0; c < 3; ++c) {
+    SpatialControls s1 = grainOnly(kUhdS35, 3), s05 = s1;
+    s05.grainSize = 0.5;
+    REQUIRE(grainUnitParams(film().grain.print[size_t(c)], kUhdS35, 0.5).rPx < 0.25f);
+    const double rms1 = discMeanStd(deviation(big, s1, GrainStage::Print, c), n, n, diamPx);
+    const double rms05 = discMeanStd(deviation(big, s05, GrainStage::Print, c), n, n, diamPx);
+    MESSAGE("print layer " << c << ": 48 um rms Size 1 " << rms1 << ", Size 0.5 (Gaussian) " << rms05 << " (ratio "
+                           << rms05 / rms1 << ")");
+    CHECK(std::abs(rms05 / rms1 - 1) <= 0.10);
+  }
+}
+
+TEST_CASE("grain sub-window") {
+  const int w = 300, h = 200;
+  TestImage src(tight(0, 0, w, h), 0.f);
+  fillRandom(src, 5, false);
+  const RenderWindow sub{37, 53, 37 + 150, 53 + 90};
+  for (bool fx : {false, true}) {
+    SpatialControls s = grainOnly(kUhdS35, 11);
+    s.sharpness = s.halation = s.bloom = fx;
+    TestImage a(tight(0, 0, w, h), 7.f), b(tight(0, 0, w, h), 7.f);
+    renderFilm(src.cview(), a.view(), {0, 0, w, h}, film(), LookControls{}, s);
+    renderFilm(src.cview(), b.view(), sub, film(), LookControls{}, s);
+    double worst = 0;
+    for (int y = sub.y1; y < sub.y2; ++y)
+      for (int x = sub.x1; x < sub.x2; ++x)
+        for (int c = 0; c < 4; ++c) worst = std::max(worst, double(std::abs(a.at(x, y)[c] - b.at(x, y)[c])));
+    INFO("effects " << fx << ": max |diff| " << worst);
+    if (fx) CHECK(worst <= 1e-6);  // same bar as the M4 sub-window test
+    else CHECK(worst == 0);
+    CHECK(b.at(sub.x1 - 1, sub.y1)[0] == 7.f);
+  }
+}
+
+TEST_CASE("grain extreme densities") {
+  const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+  for (GrainStage st : {GrainStage::Negative, GrainStage::Print}) {
+    const auto& layers = layersOf(st);
+    for (int c = 0; c < 3; ++c) {
+      const auto& g = layers[size_t(c)];
+      const float values[] = {-1.f, float(g.density.front() - 0.5), float(g.density.back() + 1.0), 10.f, nan, inf, -inf};
+      for (float v : values) {
+        Image4f img = uniform(64, 64, {1.f, 1.f, 1.f});
+        for (size_t i = size_t(c); i < img.px.size(); i += 4) img.px[i] = v;
+        SpatialControls s = grainOnly(kUhdS35, 9);
+        s.grainAmount = 3;
+        for (double size : {0.5, 2.0}) {  // at 0.5 the print clouds are sub-pixel: the Gaussian path
+          s.grainSize = size;
+          Image4f out = img;
+          grainStage(out, {0, 0, 64, 64}, film(), s, st);
+          bool ok = true;
+          for (size_t i = size_t(c); i < out.px.size(); i += 4) {
+            if (std::isfinite(v)) ok = ok && std::isfinite(out.px[i]);
+            else ok = ok && std::memcmp(&out.px[i], &v, sizeof v) == 0;
+          }
+          INFO("stage " << int(st) << " layer " << c << " D " << v << " size " << size);
+          CHECK(ok);
+        }
+      }
+    }
+  }
+  // Through the whole render: non-finite source pixels give the same finite output rules as M4.
+  const int w = 64, h = 36;
+  TestImage src(tight(0, 0, w, h), 0.f);
+  fillRandom(src, 9, true);
+  SpatialControls s = grainOnly(kUhdS35, 4);
+  s.sharpness = s.halation = s.bloom = true;
+  s.grainAmount = 3;
+  TestImage out(tight(0, 0, w, h), 7.f);
+  renderFilm(src.cview(), out.view(), {0, 0, w, h}, film(), LookControls{}, s);
+  bool finite = true;
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x)
+      for (int c = 0; c < 4; ++c) finite = finite && std::isfinite(out.at(x, y)[c]);
+  CHECK(finite);
+}
+
+TEST_CASE("grain controls are sanitised") {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  SpatialControls s;
+  s.grainAmount = nan;
+  s.grainSize = nan;
+  SpatialControls d = sanitize(s);
+  CHECK(d.grainAmount == 1);
+  CHECK(d.grainSize == 1);
+  s.grainAmount = 9;
+  s.grainSize = 9;
+  d = sanitize(s);
+  CHECK(d.grainAmount == 3);
+  CHECK(d.grainSize == 2);
+  s.grainAmount = -1;
+  s.grainSize = 0.1;
+  d = sanitize(s);
+  CHECK(d.grainAmount == 0);
+  CHECK(d.grainSize == 0.5);
+  CHECK_FALSE(SpatialControls{}.grain);  // core default off: every M4 test stays on its path
+  SpatialControls on;
+  on.sharpness = on.halation = on.bloom = false;
+  on.grain = true;
+  CHECK(on.grainOn());
+  CHECK(on.anyOn());
+  on.grainAmount = 0;
+  CHECK_FALSE(on.grainOn());
+  CHECK_FALSE(on.anyOn());
+}
+
+// Ruling R1: 64 nodes, linear in between. The nodes are amplitude() exactly (to float); between them
+// the table departs from the datasheet's log-linear curve where the curve bends sharply (see report).
+TEST_CASE("grain tables follow the amplitude") {
+  const double size = 1.3;
+  const GrainTables t = grainTables(film().grain, size);
+  for (GrainStage st : {GrainStage::Negative, GrainStage::Print})
+    for (int c = 0; c < 3; ++c) {
+      const auto& g = layersOf(st)[size_t(c)];
+      const GrainAmplitudeTable& tab = t.stage(st)[size_t(c)];
+      CHECK(tab.lo == float(g.density.front()));
+      CHECK(tab.hi == float(g.density.back()));
+      double nodeErr = 0, pointErr = 0;
+      for (int i = 0; i < kGrainTableSize; ++i) {
+        const double D = g.density.front() + (g.density.back() - g.density.front()) * i / (kGrainTableSize - 1);
+        nodeErr = std::max(nodeErr, std::abs(tab.a[size_t(i)] / g.amplitude(D, size) - 1));
+      }
+      for (double D : g.density) pointErr = std::max(pointErr, std::abs(tab.at(float(D)) / g.amplitude(D, size) - 1));
+      MESSAGE("stage " << int(st) << " layer " << c << ": table at the digitised points, worst |table/amplitude - 1| " << pointErr);
+      CHECK(nodeErr <= 1e-6);
+      CHECK(pointErr <= 0.10);
+      CHECK(tab.at(-5.f) == tab.a.front());  // held outside the digitised range
+      CHECK(tab.at(9.f) == tab.a.back());
+      CHECK(tab.at(std::numeric_limits<float>::quiet_NaN()) == 0.f);
+    }
+}
+
+TEST_CASE("UHD grain timing" * doctest::skip()) {
+  const int w = 3840, h = 2160;
+  const Image4f in = uniform(w, h, {1.f, 1.2f, 1.4f});
+  for (GrainStage st : {GrainStage::Negative, GrainStage::Print}) {
+    Image4f img = in;
+    const auto t0 = std::chrono::steady_clock::now();
+    grainStage(img, {0, 0, w, h}, film(), grainOnly(kUhdS35, 1), st);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const std::string label = st == GrainStage::Negative ? "negative" : "print";
+    MESSAGE(label << " grainStage Full, UHD: " << ms << " ms");
+  }
+}

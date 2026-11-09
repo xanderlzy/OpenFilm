@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "core/film_renderer.hpp"
 #include "core/pixel_ops.hpp"
+#include "metal/grain_common.h"
 
 namespace openfilm {
 
@@ -133,7 +135,15 @@ SpatialControls sanitize(SpatialControls s) {
   s.bloomAmount = fixed(s.bloomAmount, d.bloomAmount, 0, 1);
   s.bloomRadiusMm = fixed(s.bloomRadiusMm, d.bloomRadiusMm, 0.05, 5);
   s.pxPerMm = std::isfinite(s.pxPerMm) && s.pxPerMm > 0 ? std::min(s.pxPerMm, 1e4) : d.pxPerMm;
+  s.grainAmount = fixed(s.grainAmount, d.grainAmount, 0, 3);
+  s.grainSize = fixed(s.grainSize, d.grainSize, 0.5, 2);
   return s;
+}
+
+uint32_t frameSeedFromTime(double time) {
+  uint64_t bits = 0;
+  std::memcpy(&bits, &time, sizeof bits);
+  return of_hash2(uint32_t(bits), uint32_t(bits >> 32));
 }
 
 int spatialMarginPx(const FilmOptics& optics, const SpatialControls& controls) {
@@ -216,6 +226,31 @@ void edgeEffect(Image4f& D, const FilmOptics& optics, const SpatialControls& con
   if (s.sharpness) unsharpDensity(D, optics.negative, s.pxPerMm);
 }
 
+void grainStage(Image4f& D, const WorkRect& rect, const BakedFilm& film, const SpatialControls& controls, GrainStage st) {
+  const SpatialControls s = sanitize(controls);
+  if (!s.grainOn() || !film.grain.valid) return;
+  const auto& layers = st == GrainStage::Negative ? film.grain.negative : film.grain.print;
+  const GrainTables tables = grainTables(film.grain, s.grainSize);
+  const auto& amp = tables.stage(st);
+  std::array<GrainUnitParams, 3> unit;
+  std::array<uint32_t, 3> seed{};
+  for (size_t c = 0; c < 3; ++c) {
+    unit[c] = grainUnitParams(layers[c], s.pxPerMm, s.grainSize);
+    seed[c] = grainSeed(s.frameSeed, st, int(c));
+  }
+  const float amount = float(s.grainAmount);
+  parallelRows(D.height, [&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y)
+      for (int x = 0; x < D.width; ++x) {
+        float* p = D.at(x, y);
+        for (size_t c = 0; c < 3; ++c) {
+          if (!std::isfinite(p[c])) continue;
+          p[c] += amount * amp[c].at(p[c]) * grainUnit(unit[c], rect.x1 + x, rect.y1 + y, seed[c]);
+        }
+      }
+  });
+}
+
 void printExposeStage(Image4f& DtoP, const BakedFilm& film) {
   forEachPixel(DtoP, [&](float* p) {
     const auto pe = film.lutPE.lookup(p[0], p[1], p[2]);
@@ -261,20 +296,22 @@ void finishStage(const Image4f& Dp, const WorkRect& rect, const BakedFilm& film,
 void renderFilm(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const BakedFilm& film,
                 const LookControls& look, const SpatialControls& spatial) {
   if (win.x2 <= win.x1 || win.y2 <= win.y1) return;
-  if (!spatial.anyOn()) {
+  const SpatialControls s = sanitize(spatial);
+  if (!s.anyOn()) {
     renderFilmCpu(src, dst, win, film, look);
     return;
   }
-  const SpatialControls s = sanitize(spatial);
   const WorkRect rect = workRect(src, win, spatialMarginPx(film.optics, s));
   Image4f img;
   exposeStage(src, rect, film, exposureGain(look.exposureStops), img);
   exposureEffects(img, film.optics, s);
   developStage(img, film);
   edgeEffect(img, film.optics, s);
+  grainStage(img, rect, film, s, GrainStage::Negative);
   printExposeStage(img, film);
   printSharpness(img, film.optics, s);
   printDevelopStage(img, film, printOffsetsLogE(film.balance, look));
+  grainStage(img, rect, film, s, GrainStage::Print);
   finishStage(img, rect, film, dst, win);
 }
 
