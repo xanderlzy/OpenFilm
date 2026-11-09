@@ -10,6 +10,8 @@ meta gives instead the path of a points CSV (relative to tools/digitize/). This 
   - makes characteristic curves non-decreasing (a real film curve never loses density with more
     exposure; any dip is digitising noise) and refuses to build if a dip is bigger than 0.02 D;
   - keeps MTF points as digitised (percent -> fraction, repeated frequencies averaged, no resampling);
+  - granularity: takes each grain-versus-log-E point through the figure's own density curve to
+    [density, sigma D] (see granularity_layer); the cloud radius and sources are copied from the meta;
   - derives halation.layerSplit from the layer sensitivities (negatives only);
   - validates the result against data/stocks/schema.json and prints "valid".
 """
@@ -29,6 +31,7 @@ from figure import REPO_ROOT, TOOLS_DIR, read_points  # noqa: E402
 NM_MIN, NM_MAX, NM_STEP = 380, 780, 5
 LOGE_STEP = 0.05
 MAX_MONOTONE_FIX = 0.02
+GRAN_MERGE_D = 0.01  # granularity points closer in density than this are averaged
 SCHEMA = os.path.join(REPO_ROOT, "data", "stocks", "schema.json")
 
 
@@ -77,12 +80,43 @@ def layer_split(layers):
     return split, f"layerSplit (600-700 nm sensitivity ratio): {split}"
 
 
+def granularity_layer(grain_pts, density_pts, label):
+    """[[density, sigma]] for one layer. The datasheet plots grain against relative log E beside the
+    figure's own density curves; each grain point is taken to density by linear interpolation on
+    the layer's density curve (points outside it are dropped). Points whose densities fall within
+    GRAN_MERGE_D of each other (the flat toe, where the curve is a plateau) are averaged so density is
+    strictly ascending."""
+    dx, dy = _clean(density_pts)
+    kept = [(float(np.interp(x, dx, dy)), s) for x, s in grain_pts if dx[0] <= x <= dx[-1]]
+    dropped = len(grain_pts) - len(kept)
+    kept.sort()
+    merged = []
+    for d, s in kept:
+        if merged and d - merged[-1][-1][0] < GRAN_MERGE_D:
+            merged[-1].append((d, s))
+        else:
+            merged.append([(d, s)])
+    pairs = [[round(float(np.mean([d for d, _ in g])), 4), round(float(np.mean([s for _, s in g])), 4)] for g in merged]
+    return pairs, f"{label}: {len(pairs)} points from {len(grain_pts)} ({dropped} outside the density curve), " \
+                  f"density {pairs[0][0]}..{pairs[-1][0]}, sigma {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)}"
+
+
+def build_granularity(g):
+    out = {"apertureUm": g["apertureUm"], "cloudRadiusUm": g["cloudRadiusUm"]}
+    lines = []
+    for ch in ("red", "green", "blue"):
+        out[ch], line = granularity_layer(_load(g[ch]["grain"]), _load(g[ch]["density"]), f"{ch} granularity")
+        lines.append(line)
+    out["sources"] = g["sources"]
+    return out, lines
+
+
 def _load(rel):
     return read_points(os.path.join(TOOLS_DIR, rel))
 
 
 def build(meta):
-    out = {k: v for k, v in meta.items() if k not in ("layers", "dyeDensity", "baseDensity", "comment", "mtf", "halation")}
+    out = {k: v for k, v in meta.items() if k not in ("layers", "dyeDensity", "baseDensity", "comment", "mtf", "halation", "granularity")}
     report = []
     out["layers"] = {}
     for ch in ("red", "green", "blue"):
@@ -111,9 +145,12 @@ def build(meta):
         hal["layerSplit"], note = layer_split(out["layers"])
         report.append(note)
         out["halation"] = {k: hal[k] for k in ("baseThicknessMm", "remjetReflectance", "layerSplit", "sources")}
+    if "granularity" in meta:
+        out["granularity"], lines = build_granularity(meta["granularity"])
+        report += lines
     # Keep the schema's key order so the files diff cleanly.
     order = ["id", "displayName", "type", "densitometry", "sources", "balanceIlluminantK",
-             "midGreyLogExposure", "labAimDensity", "layers", "dyeDensity", "baseDensity", "mtf", "halation", "interlayer"]
+             "midGreyLogExposure", "labAimDensity", "layers", "dyeDensity", "baseDensity", "mtf", "halation", "granularity", "interlayer"]
     return {k: out[k] for k in order if k in out}, report
 
 
@@ -124,7 +161,8 @@ def check_sorted(doc):
         elif isinstance(node, dict):
             for v in node.values():
                 yield from arrays(v)
-    for arr in arrays({"layers": doc["layers"], "dye": doc["dyeDensity"], "base": doc.get("baseDensity", [])}):
+    for arr in arrays({"layers": doc["layers"], "dye": doc["dyeDensity"], "base": doc.get("baseDensity", []),
+                    "gran": {k: doc["granularity"][k] for k in ("red", "green", "blue")} if "granularity" in doc else {}}):
         xs = [p[0] for p in arr]
         if xs != sorted(set(xs)):
             raise SystemExit("an [x, y] array is not strictly ascending")

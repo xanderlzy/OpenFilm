@@ -109,6 +109,33 @@
         }
       }
     },
+    "granularity": {
+      "description": "Datasheet diffuse rms granularity per layer: [density, sigma D] pairs, density strictly ascending (the datasheet's grain-versus-exposure curve taken through its own density curve), measured with a circular aperture of apertureUm; cloudRadiusUm is the dye-cloud radius the grain model starts from.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apertureUm", "cloudRadiusUm", "red", "green", "blue", "sources"],
+      "properties": {
+        "apertureUm": { "type": "number", "exclusiveMinimum": 0 },
+        "cloudRadiusUm": { "type": "number", "exclusiveMinimum": 0 },
+        "red": { "$ref": "#/$defs/granularityCurve" },
+        "green": { "$ref": "#/$defs/granularityCurve" },
+        "blue": { "$ref": "#/$defs/granularityCurve" },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["title", "note"],
+            "properties": {
+              "title": { "type": "string" },
+              "url": { "type": "string", "pattern": "^https?://" },
+              "note": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
     "interlayer": {
       "description": "3x3 interlayer (inter-image) effect matrix; identity in M2.",
       "type": "array", "minItems": 3, "maxItems": 3,
@@ -122,6 +149,15 @@
       "then": { "required": ["labAimDensity"] } }
   ],
   "$defs": {
+    "granularityCurve": {
+      "description": "[density >= 0, sigma D > 0] pairs.",
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "array", "minItems": 2, "maxItems": 2,
+        "prefixItems": [ { "type": "number", "minimum": 0 }, { "type": "number", "exclusiveMinimum": 0 } ]
+      }
+    },
     "mtfCurve": {
       "description": "[cycles/mm > 0, response fraction > 0] pairs.",
       "type": "array", "minItems": 2,

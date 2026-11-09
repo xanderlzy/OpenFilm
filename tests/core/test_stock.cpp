@@ -175,3 +175,41 @@ TEST_CASE("malformed MTF is rejected") {
   nomtf.erase("mtf");
   CHECK(loadError("nomtf", nomtf.dump()).find("mtf") != std::string::npos);
 }
+
+TEST_CASE("granularity loads") {
+  for (const char* id : {"kodak-5219-type", "kodak-2383-type"}) {
+    CAPTURE(id);
+    const Stock s = loadStock(kStocks + "/" + id + ".json");
+    REQUIRE(s.granularity.has_value());
+    const Granularity& g = *s.granularity;
+    CHECK(g.apertureUm == 48.0);
+    CHECK(g.cloudRadiusUm > 0.5);
+    CHECK(g.cloudRadiusUm < 20.0);
+    for (int i = 0; i < 3; ++i) {
+      const GranularityCurve& c = g.layers[i];
+      REQUIRE(c.density.size() >= 6);
+      REQUIRE(c.sigma.size() == c.density.size());
+      for (size_t k = 0; k < c.density.size(); ++k) {
+        CHECK(c.sigma[k] > 0.001);
+        CHECK(c.sigma[k] < 0.1);
+        if (k > 0) CHECK(c.density[k] > c.density[k - 1]);
+      }
+    }
+  }
+
+  std::ifstream in(kStocks + "/kodak-5219-type.json");
+  std::stringstream ss;
+  ss << in.rdbuf();
+  const nlohmann::json good = nlohmann::json::parse(ss.str());
+  nlohmann::json none = good;
+  none.erase("granularity");
+  CHECK(loadError("nogran", none.dump()).empty());  // optional
+  const std::string path = (std::filesystem::temp_directory_path() / "openfilm_nogran_ok.json").string();
+  { std::ofstream(path) << none.dump(); }
+  CHECK(loadStock(path).granularity == std::nullopt);
+  std::filesystem::remove(path);
+  nlohmann::json rev = good;
+  std::reverse(rev["granularity"]["green"].begin(), rev["granularity"]["green"].end());
+  const std::string err = loadError("granrev", rev.dump());
+  CHECK(err.find("granularity") != std::string::npos);
+}

@@ -1,0 +1,18 @@
+{
+  "comment": "Kodak VISION3 500T 5219/7219 'Diffuse rms Granularity Curves' (TI2647C), p.4. Vector graph, process ECN-2; the page text gives the 48 micrometre aperture. The figure draws, against one shared x axis (LOG RELATIVE EXPOSURE, 0-5), the three density curves (solid, left DENSITY axis 0-3) and the three grain curves (dashed, right GRANULARITY SIGMA D axis, logarithmic, .001-.10). The datasheet tells the reader to find a density on the left scale, go across to that layer's density curve, then up or down to its grain curve and across to the right scale; build_stock.py does exactly that, so both sets are digitised here and 'density_<layer>' curves are kept beside the grain curves. Every curve is drawn in the same near-black stroke, so solid curves are told apart by bounding box (B top, G middle, R bottom). The three dashed grain curves are two drawings: the blue one alone, and the green and red ones in a single drawing as two pen-up-separated runs (subpath 0 = green, which starts at sigma 0.0073; subpath 1 = red, which starts at 0.0049); the B/G/R letters at the line ends confirm blue above green above red at the right edge. The right axis is calibrated on the .001 and .10 tick marks (decades 57.9 pt apart, matching the .01 tick), the left on 0.0 and 3.0, the x axis on 0.0 and 5.0.",
+  "pdf": "7219.pdf",
+  "page": 4,
+  "clip": [40, 135, 300, 352],
+  "columns": ["logRelE", "density"],
+  "xAxis": {"v0": 0.0, "v1": 5.0, "labelClip": [55, 350, 260, 359]},
+  "yAxis": {"v0": 0.0, "v1": 3.0, "labelClip": [48, 150, 64, 350.5]},
+  "yAxis2": {"v0": 0.001, "v1": 0.1, "log": true, "labelClip": [256, 225, 274, 350]},
+  "curves": {
+    "blue":  {"axis": "y2", "columns": ["logRelE", "sigmaD"], "color": [0.0112, 0.0161, 0.0175], "dashes": "[ 1.8001 1.8001 ] 0", "bbox": [66.8, 258.6, 250.9, 286.5]},
+    "green": {"axis": "y2", "columns": ["logRelE", "sigmaD"], "color": [0.0112, 0.0161, 0.0175], "dashes": "[ 1.8001 1.8001 ] 0", "bbox": [66.8, 279.0, 250.9, 304.1], "subpath": 0},
+    "red":   {"axis": "y2", "columns": ["logRelE", "sigmaD"], "color": [0.0112, 0.0161, 0.0175], "dashes": "[ 1.8001 1.8001 ] 0", "bbox": [66.8, 279.0, 250.9, 304.1], "subpath": 1},
+    "density_blue":  {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [66.8, 163.0, 250.9, 290.4]},
+    "density_green": {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [66.8, 178.6, 250.9, 308.5]},
+    "density_red":   {"color": [0.0112, 0.0161, 0.0175], "dashes": null, "bbox": [66.8, 222.0, 250.9, 332.2]}
+  }
+}

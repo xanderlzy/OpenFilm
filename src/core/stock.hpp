@@ -36,6 +36,19 @@ struct Halation {
   Vec3 layerSplit{};                             // r, g, b; r == 1
 };
 
+// Datasheet rms granularity of one layer: sigma D at each density, density strictly ascending.
+struct GranularityCurve {
+  std::vector<double> density, sigma;
+};
+
+// Diffuse rms granularity (sigma D) per layer, as measured with `apertureUm`, plus the dye-cloud
+// radius the grain model starts from.
+struct Granularity {
+  std::array<GranularityCurve, 3> layers;  // layer order as Stock::curve
+  double apertureUm = 48;
+  double cloudRadiusUm = 0;  // dye-cloud radius, from `sources`
+};
+
 struct Stock {
   std::string id, displayName;
   StockType type = StockType::Negative;
@@ -46,6 +59,7 @@ struct Stock {
   Spectrum base{};                        // film base density; zeros if absent
   std::array<MtfCurve, 3> mtf;            // layer order as `curve`
   std::optional<Halation> halation;       // negatives only
+  std::optional<Granularity> granularity;
   double balanceIlluminantK = 0, midGreyLogExposure = 0;
   Vec3 labAimDensity{};
 };

@@ -16,7 +16,7 @@ import fitz  # PyMuPDF  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402
 
 from figure import REPO_ROOT, load_figure, points_path, read_points  # noqa: E402
-from pdf_vectors import figure_axes  # noqa: E402
+from pdf_vectors import curve_y_axis, figure_axes  # noqa: E402
 
 DPI = 300
 MAGENTA = (255, 0, 255)
@@ -30,12 +30,13 @@ def overlay(fig, pdf_dir, out_dir):
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     draw = ImageDraw.Draw(img)
     scale = DPI / 72.0
-    xa, ya = figure_axes(page, fig)
+    xa, ys = figure_axes(page, fig)
     for name, curve in fig["curves"].items():
         path = points_path(fig["name"], name)
         if not os.path.exists(path):
             print(f"  {name}: no points file, skipped")
             continue
+        ya = curve_y_axis(ys, curve)
         r = 4 if curve.get("hand") else 1.5
         for x, y in read_points(path):
             px = (xa.to_pdf(x) - clip.x0) * scale

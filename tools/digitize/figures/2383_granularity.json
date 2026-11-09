@@ -1,0 +1,18 @@
+{
+  "comment": "Kodak VISION Color Print Film 2383 'Diffuse rms Granularity Curves' (F010_0295AC), p.4. Raster image (412x402 px native), read by eye from a 400 dpi render. Process ECP-2D, Status A. Like the 7219 figure it draws the three density curves (steep, left DENSITY axis 0-4) and the three grain curves (shallow, right GRANULARITY SIGMA D axis, logarithmic, .001-.100) on one LOG RELATIVE EXPOSURE axis (0-3, curves end near 1.95); the datasheet says to go from a density through the density curve to the grain curve, which build_stock.py does, so both sets are read ('density_<layer>' beside the grain curves). The page says to multiply sigma by 1000 for the rms value; the 48 micrometre aperture is the one stated on the 7219 page and is assumed for this figure (it is not printed on the 2383 page). Axis calibration from the drawn ticks on the 400 dpi render (clip aligned to whole pixels, origin 329.76 / 50.4 pt): x 0.0 at pixel 122.5 and 3.0 at 1148.5; density 0.0 at 1151.5 and 4.0 at 125.5; sigma .100 at 669.5 and .001 at 1156.5 (the .010 tick at 912.5 agrees); converted to PDF points as clip origin + pixel * 72/400. Grain points are read every 0.1 log E. Ambiguities: (1) the red and green grain curves cross near log E 0.45 (the one that dips at log E 0.2-0.3 climbs above the flat one); the labels at the line ends put red above green, so the dipping curve is read as red; the two are within 12 % of each other there. (2) Below log E 0.15 the red and green grain lines are one thick block and are read at its top and bottom thirds. (3) The three density curves coincide on the toe (read as 0.05-0.07 D) and, between log E 1.0 and 1.5 and above D 2.1, two of the three are merged into one band: the band's edges are split (blue at its left edge, green at its right edge or the red at the right edge for the upper steep part), so the merged parts carry up to 0.03 D of error. Red is the rightmost, blue the leftmost line; the top ends read blue 3.30, green 3.14, red 3.03.",
+  "pdf": "2383.pdf",
+  "page": 4,
+  "clip": [329.76, 50.4, 577.44, 291.6],
+  "columns": ["logRelE", "density"],
+  "xAxis": {"v0": 0.0, "v1": 3.0, "p0": 351.81, "p1": 536.49},
+  "yAxis": {"v0": 0.0, "v1": 4.0, "p0": 257.67, "p1": 72.99},
+  "yAxis2": {"v0": 0.1, "v1": 0.001, "log": true, "p0": 170.91, "p1": 258.57},
+  "curves": {
+    "red":   {"hand": true, "axis": "y2", "columns": ["logRelE", "sigmaD"]},
+    "green": {"hand": true, "axis": "y2", "columns": ["logRelE", "sigmaD"]},
+    "blue":  {"hand": true, "axis": "y2", "columns": ["logRelE", "sigmaD"]},
+    "density_red":   {"hand": true},
+    "density_green": {"hand": true},
+    "density_blue":  {"hand": true}
+  }
+}

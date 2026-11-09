@@ -9,7 +9,7 @@
       "title": "KODAK VISION Color Print Film 2383 / 3383 data sheet, Publication H-1-2383 (Revised 3-22)",
       "url": "https://www.kodak.com/content/products-brochures/Film/KODAK-VISION-Color-Print-Film-2383-3383-data-sheet.pdf",
       "retrieved": "2026-11-08",
-      "figures": ["Sensitometric Curves (p.4, F002_1254AC)", "Spectral Sensitivity Curves (p.5, F010_0293AC)", "Spectral Dye Density Curves (p.5, F010_0294AC)", "Modulation-Transfer Function Curves (p.4, F010_0292AC)"]
+      "figures": ["Sensitometric Curves (p.4, F002_1254AC)", "Spectral Sensitivity Curves (p.5, F010_0293AC)", "Spectral Dye Density Curves (p.5, F010_0294AC)", "Modulation-Transfer Function Curves (p.4, F010_0292AC)", "Diffuse rms Granularity Curves (p.4, F010_0295AC)"]
     },
     {
       "title": "LAD for KODAK VISION Color Print Film, Publication H-61B",
@@ -33,6 +33,34 @@
     "red": "points/2383_mtf_red.csv",
     "green": "points/2383_mtf_green.csv",
     "blue": "points/2383_mtf_blue.csv"
+  },
+  "granularity": {
+    "apertureUm": 48,
+    "cloudRadiusUm": 2,
+    "red": {
+      "grain": "points/2383_granularity_red.csv",
+      "density": "points/2383_granularity_density_red.csv"
+    },
+    "green": {
+      "grain": "points/2383_granularity_green.csv",
+      "density": "points/2383_granularity_density_green.csv"
+    },
+    "blue": {
+      "grain": "points/2383_granularity_blue.csv",
+      "density": "points/2383_granularity_density_blue.csv"
+    },
+    "sources": [
+      {
+        "title": "KODAK VISION Color Print Film 2383 / 3383 data sheet: Diffuse rms Granularity Curves (p.4, F010_0295AC)",
+        "url": "https://www.kodak.com/content/products-brochures/Film/KODAK-VISION-Color-Print-Film-2383-3383-data-sheet.pdf",
+        "note": "Digitised from the figure's grain and density curves (figures/2383_granularity.json); each grain point is taken to density through the same figure's density curve by build_stock.py. Sigma D is the datasheet's dimensionless value (multiply by 1000 for the rms figure)."
+      },
+      {
+        "title": "assumption: dye-cloud radius 2 um",
+        "url": "https://soma.sbcc.edu/users/davega/FILMPRO_170_CINEMATOGRAPHY_I/FILMPRO_170_04_Reference_Notes/FilmGrainGain/2007-04-vitale-filmgrain_resolution.pdf",
+        "note": "No published dye-cloud size for colour print film was found. Print stock is a slow, fine-grained emulsion whose clouds are smaller than a fast negative's (the 2383 granularity is read at a 48 um aperture the 7219 page states; the 2383 page does not print the aperture and the same one is assumed). Radius 2 um is assumed, about 0.4 of the negative's 5 um (itself from Vitale's secondary 10-15 um cloud size); the M5 fit treats it as adjustable."
+      }
+    ]
   },
   "interlayer": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
 }

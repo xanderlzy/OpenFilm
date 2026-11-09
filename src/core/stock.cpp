@@ -161,6 +161,24 @@ Stock loadStock(const std::string& path) {
     s.halation = hal;
   }
 
+  if (j.contains("granularity")) {
+    const json& gj = j["granularity"];
+    Granularity g;
+    g.apertureUm = c.num(gj, "apertureUm");
+    g.cloudRadiusUm = c.num(gj, "cloudRadiusUm");
+    if (!(g.apertureUm > 0.0)) c.fail("field 'granularity.apertureUm' must be > 0");
+    if (!(g.cloudRadiusUm > 0.0)) c.fail("field 'granularity.cloudRadiusUm' must be > 0");
+    for (int i = 0; i < 3; ++i) {
+      const std::string where = std::string("granularity.") + layerNames[i];
+      for (const auto& p : c.pairs(c.field(gj, layerNames[i], "granularity."), where)) {
+        if (!(p[1] > 0.0)) c.fail("field '" + where + "' needs sigma > 0");
+        g.layers[i].density.push_back(p[0]);
+        g.layers[i].sigma.push_back(p[1]);
+      }
+    }
+    s.granularity = g;
+  }
+
   const json& dyes = c.field(j, "dyeDensity");
   const char* dyeNames[3] = {"cyan", "magenta", "yellow"};
   for (int i = 0; i < 3; ++i) {

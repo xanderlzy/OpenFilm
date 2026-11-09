@@ -99,3 +99,25 @@ Camera negatives also carry a `halation` block, which the sharpness/halation mod
   `build_stock.py` computes `sum(s_c) / sum(s_red)` over 600-700 nm on the linear layer sensitivities.
 - `sources`: where each number comes from. Values nothing published could be found for are marked
   `ASSUMPTION` with the formula used. Edit them in `meta/<id>.json`.
+
+## Granularity figures
+
+Every stock carries the datasheet's diffuse rms granularity (`granularity` in the stock file: per layer
+`[density, sigmaD]` pairs, the measuring `apertureUm` (48) and a dye-cloud `cloudRadiusUm`). The
+figures are `figures/7219_granularity.json` (vector, p.4) and `figures/2383_granularity.json` (raster,
+p.4, hand-read). Each graph draws three density curves and three grain curves on one shared
+LOG RELATIVE EXPOSURE axis, with DENSITY on the left and GRANULARITY SIGMA D (logarithmic) on the right,
+and tells the reader to find a density, go across to the layer's density curve and then up or down to its
+grain curve. So both sets are digitised, and the figure config has:
+
+- a second y scale, `"yAxis2"`, with `"axis": "y2"` on the curves that use it (the grain curves);
+- per-curve `"columns"`, since the grain curves' y values are sigma D and not density;
+- `"subpath": n` when one drawing holds several curves (the 7219 green and red grain curves are one
+  dashed path with a pen-up between them);
+- `density_<layer>` curves beside the `<layer>` grain curves.
+
+`build_stock.py` takes each grain point's log E to density by linear interpolation on that layer's density
+curve (points outside it are dropped), sorts by density and averages points less than 0.01 D apart (the
+flat toe), so the stored density is strictly ascending. In `meta/<id>.json`, `granularity` names the grain
+and density CSVs per layer, plus `apertureUm`, `cloudRadiusUm` and `sources`. No measured dye-cloud
+radius was found, so `cloudRadiusUm` is an assumption (marked `assumption:` in `sources`).

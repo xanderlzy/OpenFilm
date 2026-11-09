@@ -119,12 +119,34 @@ def _matches(d, curve):
 
 
 def figure_axes(page, fig, drawings=None):
-    """x and y Axis objects for a figure (explicit p0/p1 win; otherwise labels snapped to ticks)."""
+    """The x Axis and a dict of y Axis objects for a figure (explicit p0/p1 win; otherwise labels
+    snapped to ticks). The dict has "y" and, for figures with a second scale on the other side
+    (the granularity graphs), "y2" from the config's "yAxis2"; a curve picks its scale with "axis"."""
     clip = fitz.Rect(fig["clip"])
     if drawings is None:
         drawings = [d for d in page.get_drawings() if clip.contains(d["rect"])]
-    return (calibrate(page, clip, drawings, fig["xAxis"], True),
-            calibrate(page, clip, drawings, fig["yAxis"], False))
+    ys = {"y": calibrate(page, clip, drawings, fig["yAxis"], False)}
+    if "yAxis2" in fig:
+        ys["y2"] = calibrate(page, clip, drawings, fig["yAxis2"], False)
+    return calibrate(page, clip, drawings, fig["xAxis"], True), ys
+
+
+def curve_y_axis(ys, curve):
+    return ys[curve.get("axis", "y")]
+
+
+def _subpath(items, n):
+    """The n-th pen-up-separated run of a path's items (a drawing can hold several curves)."""
+    runs, prev = [[]], None
+    for it in items:
+        start = it[1]
+        if prev is not None and (abs(start.x - prev.x) > 0.01 or abs(start.y - prev.y) > 0.01):
+            runs.append([])
+        runs[-1].append(it)
+        prev = it[2] if it[0] == "l" else it[4]
+    if n >= len(runs):
+        raise SystemExit(f"subpath {n} requested but the path has {len(runs)}")
+    return runs[n]
 
 
 def extract(fig, pdf_dir):
@@ -133,20 +155,24 @@ def extract(fig, pdf_dir):
     clip = fitz.Rect(fig["clip"])
     drawings = [d for d in page.get_drawings() if clip.contains(d["rect"])]
     print(f"{fig['name']}: {len(drawings)} drawings in clip")
-    xa, ya = figure_axes(page, fig, drawings)
+    xa, ys = figure_axes(page, fig, drawings)
     for name, curve in fig["curves"].items():
         if curve.get("hand"):
             continue
         hits = [d for d in drawings if _matches(d, curve)]
         if len(hits) != 1:
             raise SystemExit(f"{fig['name']}/{name}: expected 1 matching path, found {len(hits)}")
+        ya = curve_y_axis(ys, curve)
+        items = hits[0]["items"]
+        if "subpath" in curve:
+            items = _subpath(items, curve["subpath"])
         pts = []
-        for it in hits[0]["items"]:
+        for it in items:
             pts += [(xa.to_value(p.x), ya.to_value(p.y)) for p in _flatten(it)]
         lo, hi = curve.get("xRange", [-1e9, 1e9])
         pts = sorted({(round(x, 4), round(y, 4)) for x, y in pts if lo <= x <= hi})
         out = points_path(fig["name"], name)
-        write_points(out, fig.get("columns", ["x", "y"]), pts,
+        write_points(out, curve.get("columns", fig.get("columns", ["x", "y"])), pts,
                      f"{fig['name']} / {name}: vector path from {fig['pdf']} p.{fig['page']} (pdf_vectors.py)")
         print(f"  {name}: {len(pts)} points, x {pts[0][0]:.3f}..{pts[-1][0]:.3f} -> {os.path.relpath(out)}")
 
