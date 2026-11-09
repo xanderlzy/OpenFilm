@@ -230,8 +230,8 @@ void grainStage(Image4f& D, const WorkRect& rect, const BakedFilm& film, const S
   const SpatialControls s = sanitize(controls);
   if (!s.grainOn() || !film.grain.valid) return;
   const auto& layers = st == GrainStage::Negative ? film.grain.negative : film.grain.print;
-  const GrainTables tables = grainTables(film.grain, s.grainSize);
-  const auto& amp = tables.stage(st);
+  const GrainAmplitudes amps = grainAmplitudes(film.grain, s.grainSize);
+  const auto& amp = amps.stage(st);
   std::array<GrainUnitParams, 3> unit;
   std::array<uint32_t, 3> seed{};
   for (size_t c = 0; c < 3; ++c) {
@@ -245,7 +245,7 @@ void grainStage(Image4f& D, const WorkRect& rect, const BakedFilm& film, const S
         float* p = D.at(x, y);
         for (size_t c = 0; c < 3; ++c) {
           if (!std::isfinite(p[c])) continue;
-          p[c] += amount * amp[c].at(p[c]) * grainUnit(unit[c], rect.x1 + x, rect.y1 + y, seed[c]);
+          p[c] += amount * float(amp[c].at(p[c])) * grainUnit(unit[c], rect.x1 + x, rect.y1 + y, seed[c]);
         }
       }
   });

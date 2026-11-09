@@ -16,6 +16,11 @@ namespace openfilm {
 
 // Mean number of clouds covering a point. An assumption: the datasheet's single aperture cannot pin it.
 constexpr double kGrainMeanOverlap = 4;
+// Aperture of the datasheet's rms granularity (mm).
+constexpr double kGrainApertureMm = 0.048;
+// Most datasheet nodes one layer may carry (the GPU's fixed arrays; ruling R4). makeGrain throws
+// std::runtime_error above it.
+constexpr int kGrainMaxNodes = 128;
 
 struct GrainLayer {
   double rMm = 0;                     // cloud radius at Size 1 (the stock's published/assumed radius)
@@ -41,6 +46,7 @@ struct FilmGrain {
 };
 
 // Memoised by stock id (mutex-guarded); valid == false when either stock has no granularity.
+// Throws std::runtime_error when a layer has more than kGrainMaxNodes usable points.
 FilmGrain makeGrain(const Stock& negative, const Stock& print);
 
 }  // namespace openfilm

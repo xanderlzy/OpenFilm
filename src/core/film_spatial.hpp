@@ -90,7 +90,7 @@ void developStage(Image4f& EtoD, const BakedFilm& film);
 // Negative edge effect (if sharpness): D_c <- D_c + k_c (D_c - G_{sigmaA,c} * D_c).
 void edgeEffect(Image4f& D, const FilmOptics& optics, const SpatialControls& s);
 // Grain on the negative (st = Negative, after the edge effect) or on the print density (st = Print,
-// after print development): D_c += Amount * a_c(D_c) * u_c, a from grainTables(film.grain, Size), u the
+// after print development): D_c += Amount * a_c(D_c) * u_c, a from grainAmplitudes(film.grain, Size) (ruling R4), u the
 // layer's grainUnit at frame pixel (rect.x1 + i, rect.y1 + j) for work pixel (i, j), seeded by
 // grainSeed(frameSeed, st, c). Non-finite D_c unchanged. No-op when !s.grainOn() or !film.grain.valid.
 // Reads no neighbours (adds nothing to spatialMarginPx). Full quality for either GrainQuality (ruling R2).

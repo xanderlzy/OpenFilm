@@ -13,7 +13,6 @@ namespace openfilm {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kQuadIntervals = 128;  // Simpson intervals over h in [0, 2r]; even
-constexpr double kDatasheetApertureMm = 0.048;
 
 // Area common to two discs of radius r whose centres are h apart (also the disc's covariogram).
 double discOverlap(double r, double h) {
@@ -63,6 +62,8 @@ GrainLayer layerOf(const GranularityCurve& c, double cloudRadiusMm) {
     g.sigma.push_back(c.sigma[i]);
   }
   if (g.density.empty()) throw std::invalid_argument("granularity: no usable points");
+  if (g.density.size() > size_t(kGrainMaxNodes))
+    throw std::runtime_error("granularity: more than " + std::to_string(kGrainMaxNodes) + " points in one layer");
   return g;
 }
 
@@ -103,7 +104,7 @@ double GrainLayer::unitPixelRms(double pixelMm, double sizeMul) const {
 }
 
 double GrainLayer::amplitude(double D, double sizeMul) const {
-  const double unit = unitApertureRms(kDatasheetApertureMm, sizeMul);
+  const double unit = unitApertureRms(kGrainApertureMm, sizeMul);
   return unit > 0 ? sigmaAt(D) / unit : 0.0;
 }
 

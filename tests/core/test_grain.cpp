@@ -466,30 +466,48 @@ TEST_CASE("grain controls are sanitised") {
   CHECK_FALSE(on.anyOn());
 }
 
-// Ruling R1: 64 nodes, linear in between. The nodes are amplitude() exactly (to float); between them
-// the table departs from the datasheet's log-linear curve where the curve bends sharply (see report).
-TEST_CASE("grain tables follow the amplitude") {
+// Ruling R4: the stage's a(D) is sigmaAt(D) * k exactly, k = 1 / unitApertureRms(48 um, Size), also
+// between nodes where the 2383 curve bends hardest (where R1's 64-entry table was 7.5 % off).
+TEST_CASE("grain amplitude is exact") {
   const double size = 1.3;
-  const GrainTables t = grainTables(film().grain, size);
+  const GrainAmplitudes amps = grainAmplitudes(film().grain, size);
   for (GrainStage st : {GrainStage::Negative, GrainStage::Print})
     for (int c = 0; c < 3; ++c) {
-      const auto& g = layersOf(st)[size_t(c)];
-      const GrainAmplitudeTable& tab = t.stage(st)[size_t(c)];
-      CHECK(tab.lo == float(g.density.front()));
-      CHECK(tab.hi == float(g.density.back()));
-      double nodeErr = 0, pointErr = 0;
-      for (int i = 0; i < kGrainTableSize; ++i) {
-        const double D = g.density.front() + (g.density.back() - g.density.front()) * i / (kGrainTableSize - 1);
-        nodeErr = std::max(nodeErr, std::abs(tab.a[size_t(i)] / g.amplitude(D, size) - 1));
+      const GrainLayer& g = layersOf(st)[size_t(c)];
+      const GrainAmplitude& a = amps.stage(st)[size_t(c)];
+      const double k = 1 / g.unitApertureRms(0.048, size);
+      REQUIRE(a.count == int(g.density.size()));
+      CHECK(a.k == doctest::Approx(k).epsilon(1e-12));
+      // The sharpest bend: the node whose neighbouring slopes of ln sigma differ most.
+      size_t bend = 1;
+      double worstTurn = -1;
+      for (size_t i = 1; i + 1 < g.density.size(); ++i) {
+        const double s0 = std::log(g.sigma[i] / g.sigma[i - 1]) / (g.density[i] - g.density[i - 1]);
+        const double s1 = std::log(g.sigma[i + 1] / g.sigma[i]) / (g.density[i + 1] - g.density[i]);
+        if (std::abs(s1 - s0) > worstTurn) { worstTurn = std::abs(s1 - s0); bend = i; }
       }
-      for (double D : g.density) pointErr = std::max(pointErr, std::abs(tab.at(float(D)) / g.amplitude(D, size) - 1));
-      MESSAGE("stage " << int(st) << " layer " << c << ": table at the digitised points, worst |table/amplitude - 1| " << pointErr);
-      CHECK(nodeErr <= 1e-6);
-      CHECK(pointErr <= 0.10);
-      CHECK(tab.at(-5.f) == tab.a.front());  // held outside the digitised range
-      CHECK(tab.at(9.f) == tab.a.back());
-      CHECK(tab.at(std::numeric_limits<float>::quiet_NaN()) == 0.f);
+      double worst = 0;
+      for (double D : {0.5 * (g.density[bend - 1] + g.density[bend]), 0.5 * (g.density[bend] + g.density[bend + 1]),
+                       g.density[bend], g.density.front() - 1, g.density.back() + 1})
+        worst = std::max(worst, std::abs(a.at(D) / (g.sigmaAt(D) * k) - 1));
+      MESSAGE("stage " << int(st) << " layer " << c << ": sharpest bend at D " << g.density[bend] << ", worst |a/(sigmaAt k) - 1| " << worst);
+      CHECK(worst <= 1e-6);
+      CHECK(a.at(std::numeric_limits<double>::quiet_NaN()) == 0);
     }
+}
+
+TEST_CASE("grain node limit") {
+  Stock neg = res()->stock("kodak-5219-type"), print = res()->stock("kodak-2383-type");
+  CHECK_NOTHROW(makeGrain(neg, print));
+  neg.id = "test-too-many-grain-nodes";  // makeGrain memoises by id
+  GranularityCurve& red = neg.granularity->layers[0];
+  red.density.clear();
+  red.sigma.clear();
+  for (int i = 0; i <= kGrainMaxNodes; ++i) {
+    red.density.push_back(0.1 + 0.02 * i);
+    red.sigma.push_back(0.01);
+  }
+  CHECK_THROWS_AS(makeGrain(neg, print), std::runtime_error);
 }
 
 TEST_CASE("UHD grain timing" * doctest::skip()) {

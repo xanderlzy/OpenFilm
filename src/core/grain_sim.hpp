@@ -1,6 +1,6 @@
 // Full grain on the CPU (ruling R3): the per-pixel dye-cloud unit field of one layer, the seeds
-// that make every frame, stage and layer draw its own clouds, and the amplitude tables a(D) the
-// grain stage scales it by. The sampler itself lives in src/metal/grain_common.h, shared with the
+// that make every frame, stage and layer draw its own clouds, and the amplitude a(D) the grain
+// stage scales it by. The sampler itself lives in src/metal/grain_common.h, shared with the
 // GPU, so both run the same operations.
 #pragma once
 
@@ -34,21 +34,22 @@ float grainUnit(const GrainUnitParams& p, int px, int py, uint32_t seed, int per
 float grainUnit(const GrainLayer& g, double pxPerMm, double sizeMul, int px, int py, uint32_t seed,
                 int periodCells = 0);
 
-// Ruling R1 under R3: a(D) = GrainLayer::amplitude(D, sizeMul) on kGrainTableSize evenly spaced
-// densities over the layer's digitised range [lo, hi], linear in between, held at the end values
-// outside. The CPU stage and the GPU read a(D) only from these tables.
-constexpr int kGrainTableSize = 64;
-struct GrainAmplitudeTable {
-  float lo = 0, hi = 0;
-  std::array<float, kGrainTableSize> a{};
-  float at(float D) const;  // 0 for a non-finite D
+// Ruling R4: the amplitude a(D) = sigmaAt(D) * k, k = 1 / unitApertureRms(0.048 mm, Size), exact at
+// every density. Held as plain data for the GPU: the layer's datasheet nodes (density ascending, and
+// the NATURAL log of sigma), at most kGrainMaxNodes (makeGrain enforces it), and k.
+struct GrainAmplitude {
+  int count = 0;
+  std::array<double, kGrainMaxNodes> density{}, lnSigma{};
+  double k = 0;
+  // GrainLayer::sigmaAt(D) * k, with sigmaAt's arithmetic: linear in (density, ln sigma) between nodes,
+  // held at the end nodes outside. 0 for a non-finite D or no nodes.
+  double at(double D) const;
 };
-struct GrainTables {
-  std::array<GrainAmplitudeTable, 3> negative, print;  // layer order as FilmGrain
-  const std::array<GrainAmplitudeTable, 3>& stage(GrainStage st) const {
-    return st == GrainStage::Negative ? negative : print;
-  }
+struct GrainAmplitudes {
+  std::array<GrainAmplitude, 3> negative, print;  // layer order as FilmGrain
+  const std::array<GrainAmplitude, 3>& stage(GrainStage st) const { return st == GrainStage::Negative ? negative : print; }
 };
-GrainTables grainTables(const FilmGrain& grain, double sizeMul);
+// Builds k with a quadrature per layer: once per frame, never per pixel.
+GrainAmplitudes grainAmplitudes(const FilmGrain& grain, double sizeMul);
 
 }  // namespace openfilm

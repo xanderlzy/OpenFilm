@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 #include "metal/grain_common.h"
 
@@ -10,15 +11,17 @@ namespace openfilm {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 
-GrainAmplitudeTable tableOf(const GrainLayer& g, double sizeMul) {
-  GrainAmplitudeTable t;
-  if (g.density.empty()) return t;
-  const double lo = g.density.front(), hi = g.density.back();
-  t.lo = float(lo);
-  t.hi = float(hi);
-  for (int i = 0; i < kGrainTableSize; ++i)
-    t.a[size_t(i)] = float(g.amplitude(lo + (hi - lo) * i / (kGrainTableSize - 1), sizeMul));
-  return t;
+GrainAmplitude amplitudeOf(const GrainLayer& g, double sizeMul) {
+  GrainAmplitude a;
+  if (g.density.size() > size_t(kGrainMaxNodes)) throw std::runtime_error("grain: more than kGrainMaxNodes nodes");
+  a.count = int(g.density.size());
+  for (size_t i = 0; i < g.density.size(); ++i) {
+    a.density[i] = g.density[i];
+    a.lnSigma[i] = std::log(g.sigma[i]);
+  }
+  const double unit = g.unitApertureRms(kGrainApertureMm, sizeMul);
+  a.k = unit > 0 ? 1 / unit : 0.0;
+  return a;
 }
 }  // namespace
 
@@ -46,24 +49,27 @@ float grainUnit(const GrainLayer& g, double pxPerMm, double sizeMul, int px, int
   return grainUnit(grainUnitParams(g, pxPerMm, sizeMul), px, py, seed, periodCells);
 }
 
-float GrainAmplitudeTable::at(float D) const {
-  if (!std::isfinite(D)) return 0;
-  const float span = hi - lo;
-  if (!(span > 0) || D <= lo) return a.front();
-  if (D >= hi) return a.back();
-  const float t = (D - lo) / span * float(kGrainTableSize - 1);
-  const int i = std::min(int(t), kGrainTableSize - 2);
-  const float f = t - float(i);
-  return a[size_t(i)] + f * (a[size_t(i) + 1] - a[size_t(i)]);
+double GrainAmplitude::at(double D) const {
+  if (!std::isfinite(D) || count <= 0) return 0;
+  const auto lnS = [&]() {
+    if (D <= density[0]) return lnSigma[0];
+    const size_t n = size_t(count);
+    if (D >= density[n - 1]) return lnSigma[n - 1];
+    const size_t i = size_t(std::upper_bound(density.begin(), density.begin() + count, D) - density.begin());
+    const double span = density[i] - density[i - 1];
+    const double t = span > 0 ? (D - density[i - 1]) / span : 0.0;
+    return lnSigma[i - 1] + t * (lnSigma[i] - lnSigma[i - 1]);
+  };
+  return std::exp(lnS()) * k;
 }
 
-GrainTables grainTables(const FilmGrain& grain, double sizeMul) {
-  GrainTables t;
+GrainAmplitudes grainAmplitudes(const FilmGrain& grain, double sizeMul) {
+  GrainAmplitudes a;
   for (size_t c = 0; c < 3; ++c) {
-    t.negative[c] = tableOf(grain.negative[c], sizeMul);
-    t.print[c] = tableOf(grain.print[c], sizeMul);
+    a.negative[c] = amplitudeOf(grain.negative[c], sizeMul);
+    a.print[c] = amplitudeOf(grain.print[c], sizeMul);
   }
-  return t;
+  return a;
 }
 
 }  // namespace openfilm
