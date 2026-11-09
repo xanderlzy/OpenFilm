@@ -146,7 +146,8 @@ std::shared_ptr<const BakedFilm> bakeFilm(const FilmModel& model, int lutSizeE, 
   Lut3D lutD(lutSizeD, pLo, pHi, true);
   lutD.bake([&](const Vec3& d) { return model.printLogXyzFromPrintDensity(d); });
   const Mat3 dm = model.displayMatrix();
-  BakedFilm film{std::move(lutE), std::move(curves), std::move(lutPE), std::move(printCurves), std::move(lutD), {}, model.balance()};
+  BakedFilm film{std::move(lutE), std::move(curves), std::move(lutPE), std::move(printCurves), std::move(lutD), {}, model.balance(),
+                 makeOptics(model.negativeStock(), model.printStock())};
   for (int r = 0; r < 3; ++r)
     for (int c = 0; c < 3; ++c) film.displayMatrix[size_t(r * 3 + c)] = float(dm[size_t(r)][size_t(c)]);
   return std::make_shared<const BakedFilm>(std::move(film));

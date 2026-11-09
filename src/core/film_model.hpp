@@ -87,6 +87,8 @@ class FilmModel {
   // DI pixel pushed `c.exposureStops` over/under, through the whole chain.
   Vec3 evaluate(const Vec3& diCode, const LookControls& c) const;
   const Vec3& balance() const { return balance_; }
+  const Stock& negativeStock() const { return res_->stock(params_.negativeId); }
+  const Stock& printStock() const { return res_->stock(params_.printId); }
   double anchorScale() const { return anchorScale_; }
 
  private:

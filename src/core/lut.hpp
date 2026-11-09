@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "core/film_model.hpp"
+#include "core/optics.hpp"
 
 namespace openfilm {
 
@@ -65,6 +66,7 @@ struct BakedFilm {
   Lut3D lutD;                         // print density over [curve min, curve max + 0.02], nodes t^2 (dense at low density) -> log10 of projected XYZ
   std::array<float, 9> displayMatrix; // XYZ -> linear display light, row-major
   Vec3 balance;                       // auto-balance offsets (log E)
+  FilmOptics optics;                  // sharpness fits and halation inputs, in mm on the film
 };
 
 // Default sizes were chosen to keep baked-vs-direct error under 0.5 dE2000 (see the accuracy tests).
