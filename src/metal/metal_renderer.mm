@@ -197,8 +197,10 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
         // The command buffer keeps the table buffers alive until the GPU is done, even if the bake
         // is dropped meanwhile.
         id<MTLCommandBuffer> cmd = [queue commandBuffer];
+        if (!cmd) return false;  // report failure rather than leave the frame unwritten
         cmd.label = @"OpenFilm";
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return false;
         [enc setComputePipelineState:pso];
         [enc setBuffer:src offset:0 atIndex:0];
         [enc setBuffer:dst offset:0 atIndex:1];

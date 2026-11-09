@@ -186,7 +186,7 @@ TEST_CASE("baked tables are finite") {
   const auto film = cache().get(params());
   for (float v : film->lutE.data()) CHECK(std::isfinite(v));
   for (float v : film->lutPE.data()) CHECK(std::isfinite(v));
-  for (float v : film->lutD.data()) CHECK(std::isfinite(v));  // linear light may dip below 0 before the clip
+  for (float v : film->lutD.data()) CHECK(std::isfinite(v));  // lutD holds log10 of projected light, so negative values are legitimate
   for (const auto& c : film->negCurves)
     for (float v : c.values) CHECK(std::isfinite(v));
   for (const auto& c : film->printCurves)

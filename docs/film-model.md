@@ -86,7 +86,7 @@ pixel with no recompute**: drag them freely during playback and the picture foll
 The last table stores projected light on a log scale (so deep shadows keep their detail), and the
 screen's black clip and Gamma 2.4 are applied per pixel afterwards.
 
-Only a change of stock or Gamut compression needs a new bake, which takes about **1.4 s**; playback
+Only a change of stock or Gamut compression needs a new bake, which takes about **1.5 s**; playback
 then shows the new look. The last four looks are cached, so returning to one of them (the same
 exact settings) is instant. While one bakes, frames that use an already-baked look keep rendering.
 
@@ -134,6 +134,17 @@ review images generated in `build/digitize-review/`.
 * **No print D-min or base spectrum.** The print is modelled as dye density only; the clear
   base and fog of the real print film are not added.
 * **No halation, bloom or grain** yet; those come in later milestones.
+* **Lookup tables.** The exposure table is 129 points per side, the print-exposure and print
+  tables 97 (their points are packed toward clear film, where the eye is most sensitive).
+* **Baked versus the full spectral model.** Across Exposure +/-5 stops, with printer lights and
+  Print density over their full +/-20 range, the worst difference is **0.44 dE2000**; in the deep
+  shadows it is 0.19.
+* **Dark, saturated colours with extreme lights.** With extreme printer lights or Print density
+  these can be off by up to about **0.57 dE2000**, still below a just-noticeable difference (~1).
+* **Extreme Exposure.** Beyond +/-5 stops, the deepest shadows are checked less tightly.
+* **GPU versus CPU reference.** They agree within 1/1000 of a code value (measured 0.00008).
+* **Speed.** The colour path takes about 3.6-4 ms per UHD frame on an M4 Pro for normal footage;
+  the worst case (pure random noise) is about 9 ms. Real time either way.
 
 ## Glossary
 

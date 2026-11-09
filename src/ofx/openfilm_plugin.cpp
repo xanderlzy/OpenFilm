@@ -175,7 +175,9 @@ private:
         };
         fp.negativeId = pick(film.negatives, negativeStock_);
         fp.printId = pick(film.prints, printStock_);
-        fp.gamutCompression = gamutCompression_->getValueAtTime(args.time);
+        // A NaN/inf keyframe would poison the bake (and the whole image): use the default 0.5.
+        const double gc = gamutCompression_->getValueAtTime(args.time);
+        fp.gamutCompression = std::isfinite(gc) ? gc : 0.5;
         controls.exposureStops = exposure_->getValueAtTime(args.time);
         for (int i = 0; i < 3; ++i) controls.printerPoints[size_t(i)] = printerLight_[i]->getValueAtTime(args.time);
         controls.printDensity = printDensity_->getValueAtTime(args.time);
