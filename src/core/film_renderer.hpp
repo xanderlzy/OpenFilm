@@ -6,9 +6,9 @@
 
 namespace openfilm {
 
-// Same window, bounds and padding rules as renderExposureCpu: only pixels inside `win` are
-// written, alpha is copied, and source pixels outside `src` become (0,0,0,0). Non-finite RGB is
-// treated as 0, and non-finite controls count as 0 (the pipeline's NaN guards).
+// Only pixels inside `win` are written, alpha is copied, and source pixels outside `src` become
+// (0,0,0,0). Non-finite RGB is treated as 0, and non-finite controls count as 0 (the pipeline's NaN
+// guards). src/metal/film.metal is its GPU twin: any change here must be made there too.
 void renderFilmCpu(const ConstImageView& src, const ImageView& dst, const RenderWindow& win, const BakedFilm& film,
                    const LookControls& controls);
 

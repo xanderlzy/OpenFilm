@@ -61,11 +61,11 @@ add_custom_target(openfilm_resources DEPENDS ${OPENFILM_RESOURCES_STAMP})
 add_dependencies(openfilm_resources openfilm_coeff)  # the stamp rule reads the coeff file, so build it first
 
 # --- Core: plain C++ film maths, no OFX or Apple dependencies ---------------
-add_library(openfilm_core STATIC src/core/cpu_renderer.cpp src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp src/core/negative.cpp src/core/print.cpp src/core/film_model.cpp src/core/lut.cpp src/core/film_renderer.cpp)
+add_library(openfilm_core STATIC src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp src/core/negative.cpp src/core/print.cpp src/core/film_model.cpp src/core/lut.cpp src/core/film_renderer.cpp)
 target_include_directories(openfilm_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(openfilm_core PUBLIC nlohmann_json::nlohmann_json)
 
-add_executable(test_core tests/core/test_cpu_renderer.cpp tests/core/test_spectral.cpp tests/core/test_color.cpp tests/core/test_gamut.cpp tests/core/test_rgb2spec.cpp tests/core/test_stock.cpp tests/core/test_densitometry.cpp tests/core/test_negative.cpp tests/core/test_print.cpp tests/core/test_film_model.cpp tests/core/test_lut.cpp tests/core/test_film_renderer.cpp)
+add_executable(test_core tests/core/test_spectral.cpp tests/core/test_color.cpp tests/core/test_gamut.cpp tests/core/test_rgb2spec.cpp tests/core/test_stock.cpp tests/core/test_densitometry.cpp tests/core/test_negative.cpp tests/core/test_print.cpp tests/core/test_film_model.cpp tests/core/test_lut.cpp tests/core/test_film_renderer.cpp)
 target_compile_definitions(test_core PRIVATE OPENFILM_SOURCE_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
   OPENFILM_COEFF_PATH="${OPENFILM_COEFF}")
 add_dependencies(test_core openfilm_coeff)
@@ -76,7 +76,7 @@ add_test(NAME core COMMAND test_core)
 include(cmake/OpenFilmBundle.cmake)
 set(OPENFILM_METALLIB ${CMAKE_BINARY_DIR}/OpenFilm.metallib)
 openfilm_add_metallib(openfilm_metallib ${OPENFILM_METALLIB}
-  ${CMAKE_SOURCE_DIR}/src/metal/exposure.metal)
+  ${CMAKE_SOURCE_DIR}/src/metal/film.metal)
 
 add_library(openfilm_metal STATIC src/metal/metal_renderer.mm)
 target_link_libraries(openfilm_metal PUBLIC openfilm_core "-framework Metal" "-framework Foundation")
@@ -85,8 +85,9 @@ target_compile_options(openfilm_metal PRIVATE -fobjc-arc)
 add_executable(test_gpu tests/gpu/test_gpu_vs_cpu.mm)
 target_link_libraries(test_gpu PRIVATE openfilm_metal doctest::doctest)
 target_compile_options(test_gpu PRIVATE -fobjc-arc)
-target_compile_definitions(test_gpu PRIVATE OPENFILM_METALLIB_PATH="${OPENFILM_METALLIB}")
-add_dependencies(test_gpu openfilm_metallib)
+target_compile_definitions(test_gpu PRIVATE OPENFILM_METALLIB_PATH="${OPENFILM_METALLIB}"
+  OPENFILM_SOURCE_DATA_DIR="${CMAKE_SOURCE_DIR}/data" OPENFILM_COEFF_PATH="${OPENFILM_COEFF}")
+add_dependencies(test_gpu openfilm_metallib openfilm_coeff)
 add_test(NAME gpu COMMAND test_gpu)
 
 # --- OpenFX SDK: C headers + the official C++ "Support" wrapper library ------

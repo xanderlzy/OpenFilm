@@ -32,6 +32,10 @@ class Lut3D {
   std::array<float, 3> lookup(float a, float b, float c) const;
 
   int size() const { return size_; }
+  // Read-only, so the GPU path can sample the same domain with the same node spacing.
+  const Vec3& domainMin() const { return min_; }
+  const Vec3& domainMax() const { return max_; }
+  bool denseDarks() const { return denseDarks_; }
   // RGB interleaved, red index fastest: ((b * N + g) * N + r) * 3. This is the layout M3 uploads.
   // Node i sits at domain position (i/(N-1))^2 when denseDarks is set, else i/(N-1).
   const std::vector<float>& data() const { return data_; }

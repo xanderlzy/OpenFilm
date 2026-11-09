@@ -14,7 +14,6 @@
 
 #include "ofxsImageEffect.h"
 
-#include "core/cpu_renderer.hpp"
 #include "core/film_renderer.hpp"
 #include "core/lut.hpp"
 #include "metal/metal_renderer.h"
@@ -121,24 +120,6 @@ public:
         const openfilm::ImageGeometry dstGeom = geometryOf(*dst);
         const openfilm::RenderWindow win{args.renderWindow.x1, args.renderWindow.y1, args.renderWindow.x2,
                                          args.renderWindow.y2};
-        const double exposureStops = exposure_->getValueAtTime(args.time);
-
-        if (args.isEnabledMetalRender) {
-            // GPU path: getPixelData() is an id<MTLBuffer>, not CPU memory. (M2 declares Metal
-            // unsupported, so Resolve should never take this branch; kept for the M3 hand-over.)
-            openfilm::RenderParams params;
-            params.exposureStops = exposureStops;
-            openfilm::MetalRenderer& gpu = metalRenderer();
-            if (!gpu.isValid()) {
-                showError("OpenFilm: GPU shaders failed to load: " + gpu.error());
-                OFX::throwSuiteStatusException(kOfxStatFailed);
-            }
-            if (!gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win, params))
-                OFX::throwSuiteStatusException(kOfxStatFailed);
-            clearError();
-            return;
-        }
-
         const LoadedFilm& film = loadedFilm();
         if (!film.cache) {
             showError("OpenFilm: film data failed to load: " + film.error);
@@ -154,12 +135,34 @@ public:
         fp.negativeId = pick(film.negatives, negativeStock_);
         fp.printId = pick(film.prints, printStock_);
         fp.gamutCompression = gamutCompression_->getValueAtTime(args.time);
+        openfilm::LookControls controls;  // applied per pixel, never rebaked
+        controls.exposureStops = exposure_->getValueAtTime(args.time);
+        for (int i = 0; i < 3; ++i) controls.printerPoints[size_t(i)] = printerLight_[i]->getValueAtTime(args.time);
+        controls.printDensity = printDensity_->getValueAtTime(args.time);
+        std::shared_ptr<const openfilm::BakedFilm> baked;
         try {
-            const auto baked = film.cache->get(fp);  // re-bakes (~1.4 s) only when the look changed
-            openfilm::LookControls controls;  // applied per pixel, never rebaked
-            controls.exposureStops = exposureStops;
-            for (int i = 0; i < 3; ++i) controls.printerPoints[size_t(i)] = printerLight_[i]->getValueAtTime(args.time);
-            controls.printDensity = printDensity_->getValueAtTime(args.time);
+            baked = film.cache->get(fp);  // re-bakes (~1.4 s) only when the look changed
+        } catch (const std::exception& e) {
+            showError(std::string("OpenFilm: render failed: ") + e.what());
+            OFX::throwSuiteStatusException(kOfxStatFailed);
+        }
+
+        if (args.isEnabledMetalRender) {
+            // GPU path: getPixelData() is an id<MTLBuffer>, not CPU memory. (Metal is still declared
+            // unsupported, so Resolve should not take this branch yet.)
+            openfilm::MetalRenderer& gpu = metalRenderer();
+            if (!gpu.isValid()) {
+                showError("OpenFilm: GPU shaders failed to load: " + gpu.error());
+                OFX::throwSuiteStatusException(kOfxStatFailed);
+            }
+            if (!gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win, baked,
+                            controls))
+                OFX::throwSuiteStatusException(kOfxStatFailed);
+            clearError();
+            return;
+        }
+
+        try {
             openfilm::renderFilmCpu(openfilm::ConstImageView{static_cast<const float*>(src->getPixelData()), srcGeom},
                                     openfilm::ImageView{static_cast<float*>(dst->getPixelData()), dstGeom}, win,
                                     *baked, controls);

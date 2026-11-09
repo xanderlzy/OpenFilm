@@ -9,8 +9,9 @@
 #pragma once
 
 #include "core/image.hpp"
-#include "core/render_params.hpp"
+#include "core/lut.hpp"
 
+#include <cstddef>
 #include <memory>
 #include <string>
 
@@ -27,10 +28,16 @@ public:
     bool isValid() const;
     const std::string& error() const;  // why isValid() is false
 
-    // Encodes the pipeline onto `commandQueue` (id<MTLCommandQueue>) reading `srcBuffer` and
-    // writing `dstBuffer` (both id<MTLBuffer>). Commits without waiting. Thread-safe.
+    // Encodes the film kernel (the GPU twin of renderFilmCpu) onto `commandQueue`
+    // (id<MTLCommandQueue>) reading `srcBuffer` and writing `dstBuffer` (both id<MTLBuffer>), with
+    // the same window, bounds and alpha rules as the CPU. Commits without waiting. The film's tables
+    // are uploaded to the GPU on first use and kept while the bake is alive. Thread-safe.
     bool render(void* commandQueue, void* srcBuffer, const ImageGeometry& srcGeom, void* dstBuffer,
-                const ImageGeometry& dstGeom, const RenderWindow& win, const RenderParams& p);
+                const ImageGeometry& dstGeom, const RenderWindow& win, const std::shared_ptr<const BakedFilm>& film,
+                const LookControls& controls);
+
+    // Number of film table sets currently held on the GPU (for tests).
+    size_t cachedFilmCount() const;
 
 private:
     struct Impl;

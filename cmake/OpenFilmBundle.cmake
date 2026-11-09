@@ -13,7 +13,9 @@ function(openfilm_add_metallib target out)
     add_custom_command(
       OUTPUT ${air}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/metal
+      # -fno-fast-math: the kernels must track the CPU reference, and fast-math pow/log10 drift from it.
       COMMAND xcrun -sdk macosx metal -c ${src}
+              -fno-fast-math
               -I ${CMAKE_SOURCE_DIR}/src
               -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}
               -o ${air}
