@@ -15,7 +15,9 @@
 #include "core/color.hpp"
 #include "core/film_renderer.hpp"
 #include "core/film_spatial.hpp"
+#include "core/grain_plates.hpp"
 #include "core/grain_sim.hpp"
+#include "metal/grain_common.h"
 
 using namespace openfilm;
 
@@ -521,4 +523,158 @@ TEST_CASE("UHD grain timing" * doctest::skip()) {
     const std::string label = st == GrainStage::Negative ? "negative" : "print";
     MESSAGE(label << " grainStage Full, UHD: " << ms << " ms");
   }
+}
+
+// ---- Preview: precomputed tiling plates (one per stage and layer) ----
+namespace {
+constexpr int kTestPlate = 512;
+struct PlateSizeGuard {
+  PlateSizeGuard() { setCpuPlateSizeForTests(kTestPlate); }
+  ~PlateSizeGuard() { setCpuPlateSizeForTests(0); }
+};
+SpatialControls previewOnly(double pxPerMm = kUhdS35, uint32_t frameSeed = 1) {
+  SpatialControls s = grainOnly(pxPerMm, frameSeed);
+  s.grainQuality = GrainQuality::Preview;
+  return s;
+}
+double rmsOf(const std::vector<double>& v) {
+  double s = 0;
+  for (double x : v) s += x * x;
+  return std::sqrt(s / double(v.size()));
+}
+}  // namespace
+
+TEST_CASE("preview matches full") {
+  PlateSizeGuard guard;
+  const int n = kTestPlate;
+  // The negative at UHD S35 (clouds of about 0.5 px: the simulated path), the print at twice that
+  // scale. Each layer at its lowest, a middle and its highest digitised density.
+  for (GrainStage st : {GrainStage::Negative, GrainStage::Print}) {
+    const double scale = st == GrainStage::Negative ? kUhdS35 : 2 * kUhdS35;
+    const auto& layers = layersOf(st);
+    for (int c = 0; c < 3; ++c) {
+      const GrainLayer& g = layers[size_t(c)];
+      const double rPx = g.rMm * scale;
+      for (double t : {0.0, 0.5, 1.0}) {
+        std::array<float, 3> d{};
+        for (size_t k = 0; k < 3; ++k)
+          d[k] = float(layers[k].density.front() + t * (layers[k].density.back() - layers[k].density.front()));
+        const Image4f in = uniform(n, n, d);
+        const auto full = deviation(in, grainOnly(scale, 9), st, c);
+        const auto prev = deviation(in, previewOnly(scale, 9), st, c);
+        const double rf = rmsOf(full), rp = rmsOf(prev);
+        const double hf = halfMaxRadius(full, n, n), hp = halfMaxRadius(prev, n, n);
+        INFO("stage " << int(st) << " layer " << c << " t " << t << " r " << rPx << " px: rms " << rp << " vs " << rf
+                      << ", half-max " << hp << " vs " << hf);
+        CHECK(std::abs(rp / rf - 1) <= 0.10);
+        CHECK(std::abs(hp / hf - 1) <= 0.10);
+      }
+    }
+  }
+}
+
+TEST_CASE("plates tile") {
+  const int n = 256;
+  const auto plates = makePlates(film().grain, kUhdS35, 1.0, n);
+  for (int st = 0; st < 2; ++st)
+    for (int c = 0; c < 3; ++c) {
+      const auto& p = plates->plates[size_t(st)][size_t(c)];
+      // Std of the horizontal differences between columns x and x + 1 (wrapping for x = n - 1).
+      auto diffStd = [&](int x) {
+        double s2 = 0;
+        for (int y = 0; y < n; ++y) {
+          const double d = double(halfToFloat(p[size_t(y) * n + size_t((x + 1) % n)])) -
+                           double(halfToFloat(p[size_t(y) * n + size_t(x)]));
+          s2 += d * d;
+        }
+        return std::sqrt(s2 / n);
+      };
+      double interior = 0;
+      int count = 0;
+      for (int x = 8; x < n - 8; x += 4) { interior += diffStd(x); ++count; }
+      interior /= count;
+      INFO("stage " << st << " layer " << c << " seam " << diffStd(n - 1) << " interior " << interior);
+      CHECK(std::abs(diffStd(n - 1) / interior - 1) <= 0.10);
+    }
+}
+
+TEST_CASE("plates tile for clouds below the simulation radius") {
+  const auto plates = makePlates(film().grain, kUhdS35 / 8, 1.0, 128);  // white-noise path
+  const auto& p = plates->plates[0][0];
+  double s = 0, s2 = 0;
+  for (uint16_t h : p) { const double v = halfToFloat(h); s += v; s2 += v * v; }
+  CHECK(s2 > 0);
+  CHECK(std::abs(s / double(p.size())) < 0.1 * std::sqrt(s2 / double(p.size())));
+}
+
+TEST_CASE("preview changes every frame and repeats per frame") {
+  PlateSizeGuard guard;
+  const int n = 256;
+  const Image4f in = uniform(n, n, {1.f, 1.2f, 1.4f});
+  for (GrainStage st : {GrainStage::Negative, GrainStage::Print})
+    for (int c = 0; c < 3; ++c) {
+      const uint32_t a = frameSeedFromTime(3600.5), b = frameSeedFromTime(3600.5 + 1.0 / 24);
+      const auto va = deviation(in, previewOnly(kUhdS35, a), st, c);
+      CHECK(va == deviation(in, previewOnly(kUhdS35, a), st, c));
+      const double r = correlation(va, deviation(in, previewOnly(kUhdS35, b), st, c));
+      INFO("stage " << int(st) << " layer " << c << " frame-to-frame correlation " << r);
+      CHECK(std::abs(r) < 0.05);
+    }
+}
+
+TEST_CASE("plate view mapping") {
+  // Every orientation is a bijection of the plate and the offset moves the view.
+  const int size = 16;
+  std::array<int, 8> seen{};
+  for (uint32_t seed = 1; seed < 400; ++seed) {
+    std::vector<int> hit(size * size, 0);
+    for (int y = 0; y < size; ++y)
+      for (int x = 0; x < size; ++x) {
+        const uint32_t c = of_plate_coord(x - 5, y + 40, seed, size);
+        REQUIRE((c & 0xffff) < uint32_t(size));
+        REQUIRE((c >> 16) < uint32_t(size));
+        hit[size_t(c >> 16) * size + (c & 0xffff)]++;
+      }
+    CHECK(std::all_of(hit.begin(), hit.end(), [](int h) { return h == 1; }));
+  }
+}
+
+TEST_CASE("half conversion") {
+  for (float f : {0.f, 1.f, -1.5f, 0.333251953125f, 65504.f, 6.1035156e-5f, 5.9604645e-8f}) CHECK(halfToFloat(floatToHalf(f)) == f);
+  CHECK(floatToHalf(1.0f + 1.0f / 2048) == 0x3c00);  // tie rounds to even
+  CHECK(floatToHalf(1.0f + 3.0f / 2048) == 0x3c02);
+  CHECK(floatToHalf(1e6f) == 0x7c00);
+  CHECK(floatToHalf(1e-9f) == 0);
+  for (int i = 0; i < 2000; ++i) {
+    const float f = (float(i) - 1000) * 0.00137f;
+    CHECK(std::abs(halfToFloat(floatToHalf(f)) - f) <= std::abs(f) * 0.00049f + 1e-7f);
+  }
+}
+
+TEST_CASE("preview grain off or amount 0 is M4") {
+  PlateSizeGuard guard;
+  const int w = 97, h = 61;
+  TestImage src(tight(0, 0, w, h), 0.f);
+  fillRandom(src, 7, true);
+  const RenderWindow win{5, 7, 80, 50};
+  LookControls look;
+  look.exposureStops = 0.4;
+  TestImage ref(tight(0, 0, w, h), 7.f);
+  renderFilm(src.cview(), ref.view(), win, film(), look, effects(true));
+  SpatialControls off = previewOnly();
+  off.sharpness = off.halation = off.bloom = true;
+  SpatialControls zero = off;
+  zero.grain = true;
+  zero.grainAmount = 0;
+  off.grain = false;
+  for (const SpatialControls& s : {off, zero}) {
+    TestImage out(tight(0, 0, w, h), 7.f);
+    renderFilm(src.cview(), out.view(), win, film(), look, s);
+    CHECK(std::memcmp(out.bytes.data(), ref.bytes.data(), out.bytes.size()) == 0);
+  }
+  TestImage grainy(tight(0, 0, w, h), 7.f);
+  SpatialControls on = previewOnly();
+  on.sharpness = on.halation = on.bloom = true;
+  renderFilm(src.cview(), grainy.view(), win, film(), look, on);
+  CHECK(std::memcmp(grainy.bytes.data(), ref.bytes.data(), ref.bytes.size()) != 0);
 }

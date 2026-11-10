@@ -93,7 +93,7 @@ void edgeEffect(Image4f& D, const FilmOptics& optics, const SpatialControls& s);
 // after print development): D_c += Amount * a_c(D_c) * u_c, a from grainAmplitudes(film.grain, Size) (ruling R4), u the
 // layer's grainUnit at frame pixel (rect.x1 + i, rect.y1 + j) for work pixel (i, j), seeded by
 // grainSeed(frameSeed, st, c). Non-finite D_c unchanged. No-op when !s.grainOn() or !film.grain.valid.
-// Reads no neighbours (adds nothing to spatialMarginPx). Full quality for either GrainQuality (ruling R2).
+// Reads no neighbours (adds nothing to spatialMarginPx). Quality Full simulates the clouds per pixel; Preview reads u from tiling plates (grain_plates.hpp), same a(D).
 void grainStage(Image4f& D, const WorkRect& rect, const BakedFilm& film, const SpatialControls& s, GrainStage st);
 // Negative density -> linear print exposure P = 10^lutPE(D).
 void printExposeStage(Image4f& DtoP, const BakedFilm& film);

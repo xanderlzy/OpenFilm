@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "core/film_renderer.hpp"
+#include "core/grain_plates.hpp"
 #include "core/pixel_ops.hpp"
 #include "metal/grain_common.h"
 
@@ -232,13 +233,26 @@ void grainStage(Image4f& D, const WorkRect& rect, const BakedFilm& film, const S
   const auto& layers = st == GrainStage::Negative ? film.grain.negative : film.grain.print;
   const GrainAmplitudes amps = grainAmplitudes(film.grain, s.grainSize);
   const auto& amp = amps.stage(st);
-  std::array<GrainUnitParams, 3> unit;
   std::array<uint32_t, 3> seed{};
-  for (size_t c = 0; c < 3; ++c) {
-    unit[c] = grainUnitParams(layers[c], s.pxPerMm, s.grainSize);
-    seed[c] = grainSeed(s.frameSeed, st, int(c));
-  }
+  for (size_t c = 0; c < 3; ++c) seed[c] = grainSeed(s.frameSeed, st, int(c));
   const float amount = float(s.grainAmount);
+  if (s.grainQuality == GrainQuality::Preview) {
+    // Preview: the precomputed plates give u; the amplitude is Full's.
+    const auto plates = cpuPlates(film.grain, s.pxPerMm, s.grainSize, cpuPlateSize());
+    parallelRows(D.height, [&](int y0, int y1) {
+      for (int y = y0; y < y1; ++y)
+        for (int x = 0; x < D.width; ++x) {
+          float* p = D.at(x, y);
+          for (size_t c = 0; c < 3; ++c) {
+            if (!std::isfinite(p[c])) continue;
+            p[c] += amount * float(amp[c].at(p[c])) * plates->sample(st, int(c), rect.x1 + x, rect.y1 + y, seed[c]);
+          }
+        }
+    });
+    return;
+  }
+  std::array<GrainUnitParams, 3> unit;
+  for (size_t c = 0; c < 3; ++c) unit[c] = grainUnitParams(layers[c], s.pxPerMm, s.grainSize);
   parallelRows(D.height, [&](int y0, int y1) {
     for (int y = y0; y < y1; ++y)
       for (int x = 0; x < D.width; ++x) {

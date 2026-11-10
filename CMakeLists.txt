@@ -61,7 +61,7 @@ add_custom_target(openfilm_resources DEPENDS ${OPENFILM_RESOURCES_STAMP})
 add_dependencies(openfilm_resources openfilm_coeff)  # the stamp rule reads the coeff file, so build it first
 
 # --- Core: plain C++ film maths, no OFX or Apple dependencies ---------------
-add_library(openfilm_core STATIC src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp src/core/negative.cpp src/core/print.cpp src/core/film_model.cpp src/core/lut.cpp src/core/optics.cpp src/core/film_renderer.cpp src/core/blur.cpp src/core/film_spatial.cpp src/core/grain_model.cpp src/core/grain_sim.cpp)
+add_library(openfilm_core STATIC src/core/spectral.cpp src/core/color.cpp src/core/gamut.cpp src/core/rgb2spec.cpp src/core/stock.cpp src/core/densitometry.cpp src/core/negative.cpp src/core/print.cpp src/core/film_model.cpp src/core/lut.cpp src/core/optics.cpp src/core/film_renderer.cpp src/core/blur.cpp src/core/film_spatial.cpp src/core/grain_model.cpp src/core/grain_sim.cpp src/core/grain_plates.cpp)
 target_include_directories(openfilm_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(openfilm_core PUBLIC nlohmann_json::nlohmann_json)
 

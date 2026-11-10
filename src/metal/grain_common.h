@@ -139,4 +139,25 @@ OF_INLINE float of_grain_unit(int px, int py, float rPx, float lambdaPx, float m
     return of_overlap_mean(px, py, rPx, lambdaPx, rPx, seed, periodCells) - mu;
 }
 
+// Preview plates: where frame pixel (px, py) reads a size x size tiling plate for the frame whose
+// layer seed is `seed`. A per-frame offset in [0, size)^2 and one of the 8 symmetries of the square
+// (swap x/y, flip x, flip y) come from hashes of the seed, so every frame, stage and layer reads a
+// different view of the same plate. Returns x | (y << 16); size must be at most 65535.
+OF_INLINE OF_U32 of_plate_coord(int px, int py, OF_U32 seed, int size) {
+    const OF_U32 h = of_hash2(seed, 0x706c6174U);
+    const int ox = (int)(of_hash2(h, 1U) % (OF_U32)size), oy = (int)(of_hash2(h, 2U) % (OF_U32)size);
+    const OF_U32 o = of_hash2(h, 3U);
+    int x = (px + ox) % size, y = (py + oy) % size;
+    if (x < 0) x += size;
+    if (y < 0) y += size;
+    if (o & 1U) {
+        const int t = x;
+        x = y;
+        y = t;
+    }
+    if (o & 2U) x = size - 1 - x;
+    if (o & 4U) y = size - 1 - y;
+    return (OF_U32)x | ((OF_U32)y << 16);
+}
+
 #endif
