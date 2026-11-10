@@ -921,7 +921,8 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                            const ImageGeometry& dstGeom, const RenderWindow& win,
                            const std::shared_ptr<const BakedFilm>& film, const LookControls& look,
                            const SpatialControls& spatial) {
-    if (!spatial.anyOn()) return render(commandQueue, srcBuffer, srcGeom, dstBuffer, dstGeom, win, film, look);
+    // Decided on the sanitised controls, as renderFilm decides (a NaN Grain Amount means the default, 1).
+    if (!sanitize(spatial).anyOn()) return render(commandQueue, srcBuffer, srcGeom, dstBuffer, dstGeom, win, film, look);
     if (!impl_->valid || !commandQueue || !srcBuffer || !dstBuffer || !film) return false;
     const int ww = win.x2 - win.x1;
     const int wh = win.y2 - win.y1;

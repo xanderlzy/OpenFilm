@@ -847,6 +847,23 @@ TEST_CASE("grain full: only effect on") {
                randomFill(43, 0.f, 1.f), false);  // window entirely outside the source
 }
 
+// Non-finite grain controls mean their defaults on both sides (sanitize): a NaN Amount is Amount 1, also
+// when grain is the only effect on (the GPU must not take the colour-only path for it).
+TEST_CASE("grain full: non-finite controls") {
+    const int w = 384, h = 216;
+    const auto g = tight(0, 0, w, h);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (bool allOn : {false, true}) {
+        CAPTURE(allOn);
+        SpatialControls s = allOn ? spatialAllOn(3840 / 24.89) : spatialOff();
+        s = withGrain(s, 17);
+        s.grainAmount = nan;
+        checkGrain(g, g, {0, 0, w, h}, LookControls{}, s, randomFill(83, 0.f, 1.f, 1.f));
+        s.grainSize = nan;
+        checkGrain(g, g, {0, 0, w, h}, LookControls{}, s, pointsEdgesNoise(89, w, h));
+    }
+}
+
 TEST_CASE("grain off on the gpu is M4") {
     REQUIRE(renderer().isValid());
     const auto g = tight(0, 0, 320, 180);
