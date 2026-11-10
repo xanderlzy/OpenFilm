@@ -9,6 +9,7 @@
 #pragma once
 
 #include "core/film_spatial.hpp"
+#include "core/grain_plates.hpp"
 #include "core/image.hpp"
 #include "core/lut.hpp"
 
@@ -41,13 +42,29 @@ public:
     // The M4 path: the GPU twin of renderFilm() (film_spatial.hpp), pass for pass. Calls the overload
     // above unchanged when !spatial.anyOn(). Otherwise works on the window grown by
     // spatialMarginPx (cut to the source, see workRect) in pooled GPU buffers that go back to the
-    // pool when the command buffer completes. Commits without waiting. Thread-safe.
+    // pool when the command buffer completes. Commits without waiting. Thread-safe. Preview grain
+    // at a scale and Size with no plate set yet first generates one on `commandQueue` and waits for
+    // it (about 0.2 s at kPlateSize); renders asking for that set meanwhile wait for the same one.
     bool render(void* commandQueue, void* srcBuffer, const ImageGeometry& srcGeom, void* dstBuffer,
                 const ImageGeometry& dstGeom, const RenderWindow& win, const std::shared_ptr<const BakedFilm>& film,
                 const LookControls& look, const SpatialControls& spatial);
 
     // Number of film table sets currently held on the GPU (for tests).
     size_t cachedFilmCount() const;
+
+    // Preview grain plate sets held on the GPU (all devices).
+    size_t cachedPlateSetCount() const;
+    // Plate side for Preview grain (default kPlateSize; 0 or less restores it). Tests only.
+    void setPlateSizeForTests(int size);
+    // One plate of the set for (film's grain, pxPerMm, sizeMul) at the current plate size, generated on
+    // `commandQueue` if not cached, read back (tests): stage 0 negative / 1 print, layer 0..2.
+    std::vector<float> debugPlate(void* commandQueue, const BakedFilm& film, double pxPerMm, double sizeMul, int stage,
+                                  int layer);
+    // Tests: hold `plates` (e.g. the CPU's own, cpuPlates) as the set for (film's grain, pxPerMm, sizeMul,
+    // plates.size) on the queue's device, in place of any set held for that key, so a render reads
+    // exactly the plates the CPU reads.
+    bool setPlatesForTests(void* commandQueue, const BakedFilm& film, double pxPerMm, double sizeMul,
+                           const GrainPlates& plates);
 
     // ---- Diagnostics (tests and benchmarks) ----
     // The intermediate-buffer pool: the most idle work sets any one device holds, how many sets are

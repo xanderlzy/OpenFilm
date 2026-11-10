@@ -117,6 +117,9 @@ typedef struct {
 // DEVELOP_PRINT, PRINT_GRAIN, FINISH.
 #define OF_POST_NEG_GRAIN 16
 #define OF_POST_PRINT_GRAIN 32
+// With NEG_GRAIN / PRINT_GRAIN: Quality Preview, u read from the plates (without it, Full: u simulated
+// per pixel). A pipeline constant rather than a uniform so each pipeline holds only one sampler.
+#define OF_POST_GRAIN_PLATES 64
 
 // The stage's shape (combine, post, channels, hasAccum, lobe count and kinds) is also passed as
 // function constants, so each stage gets its own specialised pipeline.
@@ -126,21 +129,41 @@ typedef struct {
     OFLobe lobes[OF_MAX_LOBES];
 } OFFuseUniforms;
 
-// ---- M5 grain (grainStage, Quality Full) ----
-// One layer's grain at one stage: D += amount * a(D) * u, u = of_grain_unit(...) at the absolute
-// frame pixel, a(D) = exp(ln sigma interpolated at D) * k over the layer's datasheet nodes.
+// ---- M5 grain (grainStage) ----
+// Bins of each layer's node index (see OFGrainLayer::binScale).
+#define OF_GRAIN_BINS 128
+
+// One layer's grain at one stage: D += amount * a(D) * u, a(D) = exp(ln sigma interpolated at D) * k
+// over the layer's datasheet nodes; u = of_grain_unit(...) at the absolute frame pixel (Full), or
+// that layer's plate read at of_plate_coord(pixel, seed, plateSize) (Preview).
 typedef struct {
     float rPx, lambdaPx, mu, gaussRms;  // openfilm::GrainUnitParams
     float k;                            // openfilm::GrainAmplitude::k (1 / unit 48 um rms at this Size)
     int nodeOffset, nodeCount;          // the layer's nodes (density, ln sigma) in the grain node buffer
     unsigned int seed;                  // grainSeed(frameSeed, stage, layer)
+    int plateOx, plateOy;               // Preview: of_plate_view(seed, plateSize), computed once per frame
+    unsigned int plateOrient;
+    // The node index: OF_GRAIN_BINS equal bins over [first node, last node] density, bin
+    // (D - first) * binScale holding a node near the one the lookup wants (it walks from there).
+    float binScale;
 } OFGrainLayer;
 
 typedef struct {
     OFGrainLayer layer[6];  // negative R, G, B, then print R, G, B
-    float amount;           // Grain Amount
-    int quality;            // 0 Preview, 1 Full (the GPU runs Full for both until plates come to it)
+    float amount;           // Grain Amount (Quality is the pipeline's OF_POST_GRAIN_PLATES)
+    int plateSize;          // Preview: side of each plate, px
 } OFGrainUniforms;
+
+// sp_make_plate: one Preview plate (openfilm::PlateLayerParams), u per plate pixel stored as half:
+// the overlap mean over a cell grid that wraps every periodCells cells, minus mu; gaussRms times a
+// normal below OF_GRAIN_MIN_RADIUS_PX; 0 when rPx is not > 0.
+typedef struct {
+    float rPx, lambdaPx, mu, gaussRms;
+    float cellPx;
+    int periodCells;
+    int size;
+    unsigned int seed;
+} OFPlateUniforms;
 
 #if defined(__cplusplus) && !defined(__METAL_VERSION__)
 // The Metal compiler lays these out with the same rules (4-byte scalars, no padding); pin the
@@ -172,12 +195,16 @@ static_assert(sizeof(OFLobe) == 52 && offsetof(OFLobe, weight) == 24 && offsetof
 static_assert(offsetof(OFFuseUniforms, cw) == 8 && offsetof(OFFuseUniforms, lobes) == 20 &&
                   sizeof(OFFuseUniforms) == 20 + 52 * OF_MAX_LOBES,
               "OFFuseUniforms layout");
-static_assert(sizeof(OFGrainLayer) == 32 && offsetof(OFGrainLayer, k) == 16 && offsetof(OFGrainLayer, nodeOffset) == 20 &&
-                  offsetof(OFGrainLayer, seed) == 28,
+static_assert(sizeof(OFGrainLayer) == 48 && offsetof(OFGrainLayer, k) == 16 && offsetof(OFGrainLayer, nodeOffset) == 20 &&
+                  offsetof(OFGrainLayer, seed) == 28 && offsetof(OFGrainLayer, plateOx) == 32 &&
+                  offsetof(OFGrainLayer, plateOrient) == 40 && offsetof(OFGrainLayer, binScale) == 44,
               "OFGrainLayer layout");
-static_assert(offsetof(OFGrainUniforms, amount) == 192 && offsetof(OFGrainUniforms, quality) == 196 &&
-                  sizeof(OFGrainUniforms) == 200,
+static_assert(offsetof(OFGrainUniforms, amount) == 288 && offsetof(OFGrainUniforms, plateSize) == 292 &&
+                  sizeof(OFGrainUniforms) == 296,
               "OFGrainUniforms layout");
+static_assert(offsetof(OFPlateUniforms, cellPx) == 16 && offsetof(OFPlateUniforms, seed) == 28 &&
+                  sizeof(OFPlateUniforms) == 32,
+              "OFPlateUniforms layout");
 #endif
 
 #endif

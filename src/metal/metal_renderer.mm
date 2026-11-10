@@ -6,6 +6,8 @@
 #include "core/blur.hpp"
 #include "core/film_renderer.hpp"
 #include "core/film_spatial.hpp"
+#include "core/grain_plates.hpp"
+#include "metal/grain_common.h"
 #include "metal/shader_types.h"
 
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <string>
 #include <map>
 #include <mutex>
@@ -63,6 +66,9 @@ struct GpuFilm {
     // print R, G, B; where each layer's start and how many (0 when the film has no grain data).
     id<MTLBuffer> grainNodes;
     int grainOffset[6] = {}, grainCount[6] = {};
+    // Each layer's node index (OFGrainLayer::binScale): OF_GRAIN_BINS node numbers per layer.
+    id<MTLBuffer> grainBins;
+    float grainBinScale[6] = {};
 };
 
 std::shared_ptr<GpuFilm> uploadFilm(id<MTLDevice> device, const std::shared_ptr<const BakedFilm>& film) {
@@ -110,17 +116,47 @@ std::shared_ptr<GpuFilm> uploadFilm(id<MTLDevice> device, const std::shared_ptr<
                 nodes.push_back(float(std::log(gl.sigma[i])));
             }
         }
+    // Bin j of a layer starts at density first + j / binScale and holds upper_bound's answer there,
+    // kept within [1, n - 1]; the shader walks from it to the answer for its own D.
+    std::vector<uint8_t> bins(6 * OF_GRAIN_BINS, 1);
+    static_assert(kGrainMaxNodes <= 255, "node numbers are stored as bytes");
+    for (int l = 0; l < 6; ++l) {
+        const int n = g->grainCount[l];
+        if (n < 2) continue;
+        const float* nd = nodes.data() + 2 * g->grainOffset[l];
+        const float span = nd[2 * (n - 1)] - nd[0];
+        if (!(span > 0)) continue;
+        g->grainBinScale[l] = float(OF_GRAIN_BINS) / span;
+        for (int j = 0; j < OF_GRAIN_BINS; ++j) {
+            const float start = nd[0] + float(j) / g->grainBinScale[l];
+            int lo = 1;
+            while (lo < n - 1 && !(start < nd[2 * lo])) ++lo;
+            bins[size_t(l * OF_GRAIN_BINS + j)] = uint8_t(lo);
+        }
+    }
     if (nodes.empty()) nodes.assign(2, 0.f);  // a buffer to bind
     g->grainNodes = upload(device, nodes);
-    if (!g->lutE || !g->lutPE || !g->lutD || !g->curves || !g->lutE4h || !g->lutPE4 || !g->lutD4 || !g->grainNodes)
+    g->grainBins = [device newBufferWithBytes:bins.data() length:bins.size() options:MTLResourceStorageModeShared];
+    if (!g->lutE || !g->lutPE || !g->lutD || !g->curves || !g->lutE4h || !g->lutPE4 || !g->lutD4 || !g->grainNodes ||
+        !g->grainBins)
         return nullptr;
     return g;
 }
+
+// One Preview plate set in GPU memory: the six plates (negative R, G, B, then print R, G, B), each
+// size x size halves, one after another in one buffer.
+struct GpuPlates {
+    uintptr_t device = 0;
+    PlateKey key;
+    int size = 0;
+    id<MTLBuffer> plates;
+};
 
 // Every kernel of OpenFilm.metallib, compiled for one device.
 struct Pipelines {
     id<MTLComputePipelineState> film;  // M3 colour kernel
     id<MTLComputePipelineState> expose, boxDown, boxDown2, up, blurHTiled, blurHBlock, blurV, finish;
+    id<MTLComputePipelineState> makePlate;  // Preview grain plates
     id<MTLLibrary> library;  // for the specialised sp_fused pipelines
 };
 
@@ -658,8 +694,10 @@ std::array<float, 3> edgeGains(const std::array<LayerSharpness, 3>& layers) {
 // The stages of renderFilm() after exposeStage, in its order, each spread fused with its combine and
 // the pointwise stages that follow it; the last one writes the window of dst. The working image
 // starts in kFull0. With `grain`, grainStage runs on the negative density after the edge effect (or
-// after development when there is none) and on the print density after print development.
+// after development when there is none) and on the print density after print development; with
+// Quality Preview both read u from the plates (OF_POST_GRAIN_PLATES).
 void planStages(SpatialPlan& plan, const FilmOptics& optics, const SpatialControls& s, bool grain) {
+    const int plates = s.grainQuality == GrainQuality::Preview ? OF_POST_GRAIN_PLATES : 0;
     std::vector<Stage> stages;
     // A pointwise stage goes on the last spatial stage before it; with none at all (grain alone) the
     // pointwise stages make one pass of their own, with no lobes.
@@ -686,14 +724,14 @@ void planStages(SpatialPlan& plan, const FilmOptics& optics, const SpatialContro
     if (s.sharpness)
         stages.push_back({"neg edge", edgeLobe(optics.negative, s.pxPerMm), {{1.f, 1.f, 1.f}}, OF_COMBINE_EDGE,
                           edgeGains(optics.negative), 3});
-    if (grain) post(OF_POST_NEG_GRAIN);
+    if (grain) post(OF_POST_NEG_GRAIN | plates);
     post(OF_POST_PRINT_EXPOSE);
     if (s.sharpness) {
         const LayerPasses lp = layerPasses(optics.print, s.pxPerMm);
         stages.push_back({"print scatter", lp.passes, lp.weights, OF_COMBINE_STORE, {0, 0, 0}, 3});
     }
     post(OF_POST_DEVELOP_PRINT);  // no print edge effect (ruling R14): print density goes straight to finish
-    if (grain) post(OF_POST_PRINT_GRAIN);
+    if (grain) post(OF_POST_PRINT_GRAIN | plates);
     post(OF_POST_FINISH);
     int img = kFull0, other = kFull1;
     for (const Stage& st : stages) {
@@ -723,6 +761,112 @@ struct MetalRenderer::Impl {
     std::atomic<int> directLimit{kDefaultDirectLimit};
     std::atomic<size_t> lastSetBytes{0};
     std::vector<MetalRenderer::PassTime> passTimes;  // guarded by mutex
+
+    // Preview plate sets: the last two used per device, most recent first (`plateSets`), and the sets
+    // being generated right now, each with the future its generating render fulfils (`plateBuilding`).
+    // Guarded by plateMutex, never held while the GPU works.
+    struct PlateBuild {
+        uintptr_t device;
+        PlateKey key;
+        std::shared_future<std::shared_ptr<GpuPlates>> done;
+    };
+    mutable std::mutex plateMutex;
+    std::vector<std::shared_ptr<GpuPlates>> plateSets;
+    std::vector<PlateBuild> plateBuilding;
+    std::atomic<int> plateSize{kPlateSize};
+    static constexpr size_t kPlateSetsPerDevice = 2;
+
+    // The plate set for `key` on the queue's device. A set not yet held is generated on `queue` by the
+    // first render to ask for it, which waits for the GPU once; renders asking for the same key
+    // meanwhile wait for that generation instead of starting their own, renders asking for others do
+    // not. The set is published only after its command buffer has completed. nullptr on failure.
+    std::shared_ptr<GpuPlates> platesFor(id<MTLCommandQueue> queue, id<MTLComputePipelineState> makePlate,
+                                         const FilmGrain& grain, double pxPerMm, double sizeMul, int size) {
+        const uintptr_t dev = reinterpret_cast<uintptr_t>((__bridge void*)queue.device);
+        const PlateKey key = plateKey(grain, pxPerMm, sizeMul, size);
+        std::promise<std::shared_ptr<GpuPlates>> promise;
+        std::shared_future<std::shared_ptr<GpuPlates>> pending;
+        {
+            std::lock_guard<std::mutex> lock(plateMutex);
+            for (auto it = plateSets.begin(); it != plateSets.end(); ++it)
+                if ((*it)->device == dev && (*it)->key == key) {
+                    std::shared_ptr<GpuPlates> hit = *it;
+                    plateSets.erase(it);
+                    plateSets.insert(plateSets.begin(), hit);  // most recently used first
+                    return hit;
+                }
+            for (const PlateBuild& b : plateBuilding)
+                if (b.device == dev && b.key == key) pending = b.done;
+            if (!pending.valid()) plateBuilding.push_back({dev, key, promise.get_future().share()});
+        }
+        if (pending.valid()) return pending.get();  // no lock held while waiting
+
+        std::shared_ptr<GpuPlates> made;
+        try {
+            made = generatePlates(queue, makePlate, grain, pxPerMm, sizeMul, size);
+            if (made) {
+                made->device = dev;
+                made->key = key;
+            }
+        } catch (...) {
+            made.reset();
+        }
+        std::vector<std::shared_ptr<GpuPlates>> released;  // freed after the lock is dropped
+        {
+            std::lock_guard<std::mutex> lock(plateMutex);
+            if (made) publish(made, released);
+            plateBuilding.erase(std::find_if(plateBuilding.begin(), plateBuilding.end(), [&](const PlateBuild& b) {
+                return b.device == dev && b.key == key;
+            }));
+        }
+        promise.set_value(made);
+        return made;
+    }
+
+    // Puts `set` first among the held sets, dropping any other for its key and its device's sets
+    // beyond kPlateSetsPerDevice into `released`. Called with plateMutex held.
+    void publish(const std::shared_ptr<GpuPlates>& set, std::vector<std::shared_ptr<GpuPlates>>& released) {
+        size_t mine = 0;
+        for (auto it = plateSets.begin(); it != plateSets.end();)
+            if ((*it)->device == set->device && ((*it)->key == set->key || ++mine >= kPlateSetsPerDevice)) {
+                released.push_back(std::move(*it));
+                it = plateSets.erase(it);
+            } else {
+                ++it;
+            }
+        plateSets.insert(plateSets.begin(), set);
+    }
+
+    // makePlates on the GPU: one sp_make_plate dispatch per stage and layer, committed on `queue` and
+    // waited for.
+    static std::shared_ptr<GpuPlates> generatePlates(id<MTLCommandQueue> queue, id<MTLComputePipelineState> makePlate,
+                                                     const FilmGrain& grain, double pxPerMm, double sizeMul, int size) {
+        const size_t plateBytes = size_t(size) * size_t(size) * sizeof(uint16_t);
+        auto set = std::make_shared<GpuPlates>();
+        set->size = size;
+        set->plates = [queue.device newBufferWithLength:6 * plateBytes options:MTLResourceStorageModePrivate];
+        if (!set->plates) return nullptr;
+        set->plates.label = @"OpenFilm grain plates";
+        id<MTLCommandBuffer> cmd = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = cmd ? [cmd computeCommandEncoder] : nil;
+        if (!enc) return nullptr;
+        cmd.label = @"OpenFilm grain plates";
+        for (int l = 0; l < 6; ++l) {
+            const GrainStage st = l < 3 ? GrainStage::Negative : GrainStage::Print;
+            const int c = l % 3;
+            const GrainLayer& g = l < 3 ? grain.negative[size_t(c)] : grain.print[size_t(c)];
+            const PlateLayerParams p = plateLayerParams(g, pxPerMm, sizeMul, size, st, c);
+            const OFPlateUniforms u{p.unit.rPx, p.unit.lambdaPx, p.unit.mu,  p.unit.gaussRms,
+                                    p.cellPx,   p.periodCells,   size,       p.seed};
+            [enc setBuffer:set->plates offset:size_t(l) * plateBytes atIndex:0];
+            [enc setBytes:&u length:sizeof(u) atIndex:1];
+            dispatch(enc, makePlate, size, size);
+        }
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        return cmd.status == MTLCommandBufferStatusCompleted ? set : nullptr;
+    }
 
     // sp_fused specialised for one stage shape, built on first use, by (device, shape).
     std::map<std::pair<uintptr_t, std::array<int, 6>>, id<MTLComputePipelineState>> fused;
@@ -786,7 +930,8 @@ struct MetalRenderer::Impl {
         if (!build("film_kernel", &p.film) || !build("sp_expose", &p.expose) || !build("sp_box_down", &p.boxDown) ||
             !build("sp_box_down2", &p.boxDown2) || !build("sp_up", &p.up) ||
             !build("sp_blur_h_tiled", &p.blurHTiled) || !build("sp_blur_h_block", &p.blurHBlock) ||
-            !build("sp_blur_v_block", &p.blurV) || !build("sp_finish_empty", &p.finish))
+            !build("sp_blur_v_block", &p.blurV) || !build("sp_finish_empty", &p.finish) ||
+            !build("sp_make_plate", &p.makePlate))
             return false;
         pipelines[key] = p;
         *out = p;
@@ -846,6 +991,65 @@ void MetalRenderer::setDirectBlurLimit(int reads) { impl_->directLimit = reads; 
 std::vector<MetalRenderer::PassTime> MetalRenderer::lastPassTimes() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->passTimes;
+}
+
+size_t MetalRenderer::cachedPlateSetCount() const {
+    std::lock_guard<std::mutex> lock(impl_->plateMutex);
+    return impl_->plateSets.size();
+}
+
+void MetalRenderer::setPlateSizeForTests(int size) { impl_->plateSize = size > 0 ? size : kPlateSize; }
+
+std::vector<float> MetalRenderer::debugPlate(void* commandQueue, const BakedFilm& film, double pxPerMm, double sizeMul,
+                                             int stage, int layer) {
+    if (!impl_->valid || !commandQueue || stage < 0 || stage > 1 || layer < 0 || layer > 2) return {};
+    @autoreleasepool {
+        id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
+        std::string err;
+        Pipelines pl;
+        if (!impl_->pipelinesFor(queue.device, &pl, &err)) return {};
+        const auto set = impl_->platesFor(queue, pl.makePlate, film.grain, pxPerMm, sizeMul, impl_->plateSize.load());
+        if (!set) return {};
+        const size_t n = size_t(set->size) * size_t(set->size), bytes = n * sizeof(uint16_t);
+        id<MTLBuffer> out = [queue.device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> cmd = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        if (!out || !blit) return {};
+        [blit copyFromBuffer:set->plates sourceOffset:size_t(stage * 3 + layer) * bytes toBuffer:out destinationOffset:0
+                        size:bytes];
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        const _Float16* h = static_cast<const _Float16*>(out.contents);
+        return std::vector<float>(h, h + n);
+    }
+}
+
+bool MetalRenderer::setPlatesForTests(void* commandQueue, const BakedFilm& film, double pxPerMm, double sizeMul,
+                                      const GrainPlates& plates) {
+    if (!commandQueue || plates.size <= 0) return false;
+    @autoreleasepool {
+        id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
+        const size_t n = size_t(plates.size) * size_t(plates.size);
+        std::vector<uint16_t> all;
+        all.reserve(6 * n);
+        for (const auto& stage : plates.plates)
+            for (const auto& p : stage) {
+                if (p.size() != n) return false;
+                all.insert(all.end(), p.begin(), p.end());
+            }
+        auto set = std::make_shared<GpuPlates>();
+        set->device = reinterpret_cast<uintptr_t>((__bridge void*)queue.device);
+        set->key = plateKey(film.grain, pxPerMm, sizeMul, plates.size);
+        set->size = plates.size;
+        set->plates = [queue.device newBufferWithBytes:all.data() length:all.size() * sizeof(uint16_t)
+                                               options:MTLResourceStorageModeShared];
+        if (!set->plates) return false;
+        std::vector<std::shared_ptr<GpuPlates>> released;
+        std::lock_guard<std::mutex> lock(impl_->plateMutex);
+        impl_->publish(set, released);
+    }
+    return true;
 }
 
 size_t MetalRenderer::cachedFilmCount() const {
@@ -969,14 +1173,20 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
         }
         for (int k = 0; k < 9; ++k) u.displayMatrix[k] = film->displayMatrix[size_t(k)];
 
-        // Grain (grainStage's per-frame constants, from the CPU's own functions). Quality Preview runs
-        // Full here until the GPU has plates.
+        // Grain (grainStage's per-frame constants, from the CPU's own functions). Preview reads the
+        // plate set of this scale and Size, generated here first if no render has made it yet.
         const bool grain = s.grainOn() && film->grain.valid;
         OFGrainUniforms gu{};
+        std::shared_ptr<GpuPlates> plates;
         if (grain) {
             const GrainAmplitudes amps = grainAmplitudes(film->grain, s.grainSize);
             gu.amount = float(s.grainAmount);
-            gu.quality = s.grainQuality == GrainQuality::Full ? 1 : 0;
+            if (s.grainQuality == GrainQuality::Preview && W > 0 && H > 0) {
+                plates = impl_->platesFor(queue, pl.makePlate, film->grain, s.pxPerMm, s.grainSize,
+                                          impl_->plateSize.load());
+                if (!plates) return false;
+                gu.plateSize = plates->size;
+            }
             for (int l = 0; l < 6; ++l) {
                 const GrainStage st = l < 3 ? GrainStage::Negative : GrainStage::Print;
                 const int c = l % 3;
@@ -990,7 +1200,14 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                 L.k = float(amps.stage(st)[size_t(c)].k);
                 L.nodeOffset = g->grainOffset[l];
                 L.nodeCount = g->grainCount[l];
+                L.binScale = g->grainBinScale[l];
                 L.seed = grainSeed(s.frameSeed, st, c);
+                if (plates) {  // this frame's view of the plates, as GrainPlates::sample takes it
+                    const OFPlateView v = of_plate_view(L.seed, plates->size);
+                    L.plateOx = v.ox;
+                    L.plateOy = v.oy;
+                    L.plateOrient = v.orient;
+                }
             }
         }
 
@@ -1070,6 +1287,8 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                     [enc setBuffer:dst offset:0 atIndex:12];
                     [enc setBytes:&gu length:sizeof(gu) atIndex:14];
                     [enc setBuffer:g->grainNodes offset:0 atIndex:15];
+                    [enc setBuffer:plates ? plates->plates : g->grainNodes offset:0 atIndex:16];
+                    [enc setBuffer:g->grainBins offset:0 atIndex:17];
                     // One thread per OF_BLOCK pixels of a column.
                     [enc dispatchThreads:MTLSizeMake(NSUInteger(plan.gridW(p)),
                                                      NSUInteger((plan.gridH(p) + OF_BLOCK - 1) / OF_BLOCK), 1)

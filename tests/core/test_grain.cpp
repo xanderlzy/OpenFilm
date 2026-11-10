@@ -11,6 +11,7 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <thread>
 
 #include "core/color.hpp"
 #include "core/film_renderer.hpp"
@@ -677,4 +678,52 @@ TEST_CASE("preview grain off or amount 0 is M4") {
   on.sharpness = on.halation = on.bloom = true;
   renderFilm(src.cview(), grainy.view(), win, film(), look, on);
   CHECK(std::memcmp(grainy.bytes.data(), ref.bytes.data(), ref.bytes.size()) != 0);
+}
+
+// ---- The cpuPlates cache (ruling R8): one build per key however many renders ask at once; the last
+// two sets kept ----
+TEST_CASE("cpu: concurrent renders share one plate set") {
+  PlateSizeGuard guard;
+  setCpuPlateSizeForTests(64);
+  const double scale = 97.3125;  // a key no other test uses
+  const size_t builds = cpuPlateBuilds();
+  const Image4f in = uniform(48, 40, {1.f, 1.2f, 1.4f});
+  std::vector<Image4f> out(4, in);
+  std::vector<std::shared_ptr<const GrainPlates>> got(4);
+  std::vector<std::thread> threads;
+  for (size_t t = 0; t < 4; ++t)
+    threads.emplace_back([&, t] {
+      got[t] = cpuPlates(film().grain, scale, 1.0, 64);
+      grainStage(out[t], {0, 0, in.width, in.height}, film(), previewOnly(scale, 3), GrainStage::Negative);
+    });
+  for (auto& th : threads) th.join();
+  CHECK(cpuPlateBuilds() == builds + 1);
+  for (size_t t = 1; t < 4; ++t) {
+    CHECK(got[t] == got[0]);
+    CHECK(out[t].px == out[0].px);
+  }
+  CHECK(out[0].px != in.px);
+}
+
+TEST_CASE("cpu: plate cache keeps two sets") {
+  const double scales[] = {61.0625, 62.0625, 63.0625};  // keys no other test uses
+  const size_t builds = cpuPlateBuilds();
+  for (double s : scales) cpuPlates(film().grain, s, 1.0, 32);
+  CHECK(cpuPlateBuilds() == builds + 3);
+  CHECK(cpuPlateSetCount() == 2);
+  cpuPlates(film().grain, scales[2], 1.0, 32);  // newest: kept
+  cpuPlates(film().grain, scales[1], 1.0, 32);  // kept
+  CHECK(cpuPlateBuilds() == builds + 3);
+  cpuPlates(film().grain, scales[0], 1.0, 32);  // released: built again
+  CHECK(cpuPlateBuilds() == builds + 4);
+  CHECK(cpuPlateSetCount() == 2);
+}
+
+// The first build of a full-size (kPlateSize) set at UHD Super 35, for the record (run with --no-skip).
+TEST_CASE("plate build timing" * doctest::skip()) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto plates = makePlates(film().grain, kUhdS35, 1.0, kPlateSize);
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  CHECK(plates->size == kPlateSize);
+  MESSAGE("makePlates " << kPlateSize << ", UHD S35: " << ms << " ms");
 }

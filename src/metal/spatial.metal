@@ -1,8 +1,9 @@
 // GPU twin of renderFilm() with spatial effects on (src/core/film_spatial.cpp and the blur engine
 // in src/core/blur.cpp); any change there must be made here too. metal_renderer.mm plans the passes
 // from the CPU's own lobes and taps and encodes them in the CPU's order; tests/gpu/test_gpu_vs_cpu.mm
-// renders both and checks they agree. Grain (M5, grainStage Quality Full) runs in the fused pass as
-// two pointwise stages on density, with the CPU's sampler itself (grain_common.h).
+// renders both and checks they agree. Grain (M5, grainStage) runs in the fused pass as two pointwise
+// stages on density, with the CPU's sampler itself (grain_common.h): per pixel for Quality Full, from
+// plates that sp_make_plate generates with that sampler for Preview.
 //
 // Every kernel does the CPU's float operations in the CPU's order: blur taps are summed from -r to
 // r (one channel at a time), box averages row by row, lobes accumulate in lobe order. The taps are
@@ -98,9 +99,12 @@ inline void blurBlock(device const float* pl, constant float* tp, int w, int h, 
 }
 
 // GrainAmplitude::at (ruling R4): ln sigma linear in density between the layer's datasheet nodes
-// (density ascending), held at the end nodes outside, found by std::upper_bound's binary search;
-// exp of it times k. 0 for a non-finite D or no nodes.
-inline float grainAmplitude(device const float2* nodes, constant OFGrainLayer& L, float D) {
+// (density ascending), held at the end nodes outside; exp of it times k. 0 for a non-finite D or no
+// nodes. The pair of nodes is std::upper_bound's (the first node denser than D, and the one before),
+// found by walking from the node the layer's bin index gives for D: the same pair, in a step or two
+// instead of a binary search's seven dependent loads.
+inline float grainAmplitude(device const float2* nodes, device const uchar* bins, int layer, constant OFGrainLayer& L,
+                            float D) {
     if (!isfinite(D) || L.nodeCount <= 0) return 0.0f;
     device const float2* nd = nodes + L.nodeOffset;
     const int n = L.nodeCount;
@@ -110,12 +114,10 @@ inline float grainAmplitude(device const float2* nodes, constant OFGrainLayer& L
     } else if (D >= nd[n - 1].x) {
         lnS = nd[n - 1].y;
     } else {
-        int lo = 0, hi = n;  // first node with density > D
-        while (lo < hi) {
-            const int mid = (lo + hi) / 2;
-            if (D < nd[mid].x) hi = mid;
-            else lo = mid + 1;
-        }
+        // nd[0].x < D < nd[n - 1].x here, so both walks stop inside [1, n - 1].
+        int lo = int(bins[layer * OF_GRAIN_BINS + clamp(int((D - nd[0].x) * L.binScale), 0, OF_GRAIN_BINS - 1)]);
+        while (D < nd[lo - 1].x) --lo;
+        while (!(D < nd[lo].x)) ++lo;
         const float span = nd[lo].x - nd[lo - 1].x;
         const float t = span > 0.0f ? (D - nd[lo - 1].x) / span : 0.0f;
         lnS = nd[lo - 1].y + t * (nd[lo].y - nd[lo - 1].y);
@@ -124,20 +126,32 @@ inline float grainAmplitude(device const float2* nodes, constant OFGrainLayer& L
 }
 
 // grainStage on one pixel's three densities X at stage st (0 negative, 1 print), frame pixel (ix, iy):
-// D_c += amount * a_c(D_c) * u_c; non-finite D_c unchanged, as are layers with no clouds.
-inline void addGrain(thread float3& X, int st, constant OFGrainUniforms& gu, device const float2* nodes, int ix,
-                     int iy) {
+// D_c += amount * a_c(D_c) * u_c; non-finite D_c unchanged, as are layers with no clouds. u_c is the
+// simulation (Full) or, with fromPlates (a pipeline constant), the layer's plate read through this
+// frame's view of it (Preview, GrainPlates::sample); `plates` holds the six one after another,
+// negative R, G, B, then print R, G, B.
+inline void addGrain(thread float3& X, int st, bool fromPlates, constant OFGrainUniforms& gu,
+                     device const float2* nodes, device const uchar* bins, device const half* plates, int ix, int iy) {
     for (int c = 0; c < 3; ++c) {
         constant OFGrainLayer& L = gu.layer[st * 3 + c];
         if (!isfinite(X[c]) || !(L.rPx > 0.0f)) continue;
-        const float u = of_grain_unit(ix, iy, L.rPx, L.lambdaPx, L.mu, L.gaussRms, L.seed, 0);
-        X[c] += gu.amount * grainAmplitude(nodes, L, X[c]) * u;
+        float u;
+        if (fromPlates) {
+            const int n = gu.plateSize;
+            const uint pc = of_plate_map(ix, iy, L.plateOx, L.plateOy, L.plateOrient, n);  // of_plate_coord
+            u = float(plates[(st * 3 + c) * n * n + int(pc >> 16) * n + int(pc & 0xffffu)]);
+        } else {
+            u = of_grain_unit(ix, iy, L.rPx, L.lambdaPx, L.mu, L.gaussRms, L.seed, 0);
+        }
+        X[c] += gu.amount * grainAmplitude(nodes, bins, st * 3 + c, L, X[c]) * u;
     }
 }
 
 }  // namespace
 
-static_assert(sizeof(OFGrainLayer) == 32 && sizeof(OFGrainUniforms) == 200, "OFGrainUniforms layout (see shader_types.h)");
+static_assert(sizeof(OFGrainLayer) == 48 && sizeof(OFGrainUniforms) == 296 &&
+                  sizeof(OFPlateUniforms) == 32,
+              "grain uniforms layout (see shader_types.h)");
 
 // exposeStage: DI -> linear exposure (10^lutE - eps) * gain over the work rect.
 kernel void sp_expose(device const float* src [[buffer(0)]],
@@ -351,7 +365,8 @@ constant int fcKinds [[function_constant(5)]];  // 2 bits per lobe, lobe 0 lowes
 inline void emitPixel(float3 X, float3 S, constant OFFuseUniforms& fu, constant OFSpatialUniforms& u,
                       device const float* curves, device const float4* lutPE, device const float4* lutD,
                       device const float* src, device float* dst, device float* out, int n, int i, int ix,
-                      int iy, constant OFGrainUniforms& gu, device const float2* grainNodes) {
+                      int iy, constant OFGrainUniforms& gu, device const float2* grainNodes,
+                      device const uchar* grainBins, device const half* plates) {
     switch (fcCombine) {
         case OF_COMBINE_STORE:
             X = S;
@@ -370,7 +385,8 @@ inline void emitPixel(float3 X, float3 S, constant OFFuseUniforms& fu, constant 
     }
     if (fcPost & OF_POST_DEVELOP_NEG)
         for (int c = 0; c < 3; ++c) X[c] = evalCurve(curves, u.neg[c], precise::log10(stdMax(X[c], 1e-30f)));
-    if (fcPost & OF_POST_NEG_GRAIN) addGrain(X, 0, gu, grainNodes, ix, iy);
+    const bool fromPlates = (fcPost & OF_POST_GRAIN_PLATES) != 0;
+    if (fcPost & OF_POST_NEG_GRAIN) addGrain(X, 0, fromPlates, gu, grainNodes, grainBins, plates, ix, iy);
     if (fcPost & OF_POST_PRINT_EXPOSE) {
         const float3 pe = lookup(lutPE, u.lutPE, X);
         for (int c = 0; c < 3; ++c) X[c] = precise::pow(10.0f, pe[c]);
@@ -378,7 +394,7 @@ inline void emitPixel(float3 X, float3 S, constant OFFuseUniforms& fu, constant 
     if (fcPost & OF_POST_DEVELOP_PRINT)
         for (int c = 0; c < 3; ++c)
             X[c] = evalCurve(curves, u.print[c], precise::log10(stdMax(X[c], 1e-30f)) + u.offsets[c]);
-    if (fcPost & OF_POST_PRINT_GRAIN) addGrain(X, 1, gu, grainNodes, ix, iy);
+    if (fcPost & OF_POST_PRINT_GRAIN) addGrain(X, 1, fromPlates, gu, grainNodes, grainBins, plates, ix, iy);
     if (fcPost & OF_POST_FINISH) {
         device float* o = dst + (iy - u.dst.y1) * u.dst.rowFloats + (ix - u.dst.x1) * 4;
         const float3 q = lookup(lutD, u.lutD, X);
@@ -413,6 +429,8 @@ kernel void sp_fused(device const float* img [[buffer(0)]],
                      device const float* T2 [[buffer(13)]],
                      constant OFGrainUniforms& gu [[buffer(14)]],
                      device const float2* grainNodes [[buffer(15)]],
+                     device const half* plates [[buffer(16)]],
+                     device const uchar* grainBins [[buffer(17)]],
                      uint2 gid [[thread_position_in_grid]]) {
     const int W = fu.width, H = fu.height, n = W * H, K = OF_BLOCK;
     const bool finish = (fcPost & OF_POST_FINISH) != 0;
@@ -476,6 +494,21 @@ kernel void sp_fused(device const float* img [[buffer(0)]],
         }
         const int i = wy * W + wx;
         emitPixel(float3(img[i], img[n + i], img[2 * n + i]), float3(S[0][k], S[1][k], S[2][k]), fu, u, curves,
-                  lutPE, lutD, src, dst, out, n, i, ix, iy, gu, grainNodes);
+                  lutPE, lutD, src, dst, out, n, i, ix, iy, gu, grainNodes, grainBins, plates);
     }
+}
+
+// One Preview plate (makePlates' makePlate): u at plate pixel gid, rounded to half (round to nearest
+// even, as floatToHalf).
+kernel void sp_make_plate(device half* plate [[buffer(0)]],
+                          constant OFPlateUniforms& p [[buffer(1)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    const int x = int(gid.x), y = int(gid.y);
+    if (x >= p.size || y >= p.size) return;
+    float u = 0.0f;
+    if (p.rPx > 0.0f)
+        u = p.rPx >= OF_GRAIN_MIN_RADIUS_PX
+                ? of_overlap_mean(x, y, p.rPx, p.lambdaPx, p.cellPx, p.seed, p.periodCells) - p.mu
+                : p.gaussRms * of_gauss(x, y, p.seed);
+    plate[y * p.size + x] = half(u);
 }

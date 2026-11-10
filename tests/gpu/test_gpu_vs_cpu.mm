@@ -9,6 +9,7 @@
 
 #include "core/film_renderer.hpp"
 #include "core/film_spatial.hpp"
+#include "core/grain_plates.hpp"
 #include "core/lut.hpp"
 #include "metal/metal_renderer.h"
 
@@ -131,14 +132,15 @@ Result compare(const Frame& f, const float* gpu, const RenderWindow& win) {
 // Encodes one GPU render of `f` on `queue` and waits for it. Returns the dst buffer's contents.
 std::vector<float> renderGpu(id<MTLCommandQueue> queue, const Frame& f, const RenderWindow& win,
                              const std::shared_ptr<const BakedFilm>& baked, const LookControls& controls,
-                             bool* ok, const SpatialControls* spatial = nullptr) {
+                             bool* ok, const SpatialControls* spatial = nullptr, MetalRenderer* with = nullptr) {
+    MetalRenderer& r = with ? *with : renderer();
     id<MTLDevice> dev = queue.device;
     id<MTLBuffer> srcBuf = [dev newBufferWithBytes:f.src.data() length:f.src.size() * 4 options:MTLResourceStorageModeShared];
     std::vector<float> fill(f.cpu.size(), kSentinel);
     id<MTLBuffer> dstBuf = [dev newBufferWithBytes:fill.data() length:fill.size() * 4 options:MTLResourceStorageModeShared];
-    *ok = spatial ? renderer().render((__bridge void*)queue, (__bridge void*)srcBuf, f.sg, (__bridge void*)dstBuf, f.dg,
-                                      win, baked, controls, *spatial)
-                  : renderer().render((__bridge void*)queue, (__bridge void*)srcBuf, f.sg, (__bridge void*)dstBuf, f.dg,
+    *ok = spatial ? r.render((__bridge void*)queue, (__bridge void*)srcBuf, f.sg, (__bridge void*)dstBuf, f.dg, win,
+                             baked, controls, *spatial)
+                  : r.render((__bridge void*)queue, (__bridge void*)srcBuf, f.sg, (__bridge void*)dstBuf, f.dg,
                                       win, baked, controls);
     // The queue runs command buffers in order, so waiting on a later one waits for ours too.
     id<MTLCommandBuffer> fence = [queue commandBuffer];
@@ -695,7 +697,7 @@ struct GrainResult {
 };
 
 GrainResult runGrain(const ImageGeometry& sg, const ImageGeometry& dg, const RenderWindow& win, const LookControls& look,
-                     const SpatialControls& spatial, const Fill& fill) {
+                     const SpatialControls& spatial, const Fill& fill, MetalRenderer* with = nullptr) {
     REQUIRE(renderer().isValid());
     const auto baked = film();
     Frame f = makeFrame(sg, dg, fill);
@@ -706,8 +708,8 @@ GrainResult runGrain(const ImageGeometry& sg, const ImageGeometry& dg, const Ren
     renderFilm(ConstImageView{f.src.data(), sg}, ImageView{cpuOff.data(), dg}, win, *baked, look, off);
     id<MTLCommandQueue> queue = [device() newCommandQueue];
     bool ok1 = false, ok2 = false;
-    const std::vector<float> gpu = renderGpu(queue, f, win, baked, look, &ok1, &spatial);
-    const std::vector<float> gpuOff = renderGpu(queue, f, win, baked, look, &ok2, &off);
+    const std::vector<float> gpu = renderGpu(queue, f, win, baked, look, &ok1, &spatial, with);
+    const std::vector<float> gpuOff = renderGpu(queue, f, win, baked, look, &ok2, &off, with);
     CHECK(ok1);
     CHECK(ok2);
     ConstImageView cOn{f.cpu.data(), dg}, cOff{cpuOff.data(), dg}, gOn{gpu.data(), dg}, gOff{gpuOff.data(), dg};
@@ -888,6 +890,290 @@ TEST_CASE("grain off on the gpu is M4") {
         CAPTURE(d);
         CHECK(d <= 1e-3);
     }
+}
+
+// ---- M5: Preview grain on the GPU ----
+// Preview reads u from six precomputed tiling plates (one per stage and layer) that the GPU generates
+// with the same sampler as makePlates. Tests run at plate size 256 on both sides.
+
+namespace {
+
+// A second renderer for Preview tests that must use the GPU's own plates: renderer() may hold the
+// CPU's (setPlatesForTests).
+MetalRenderer& generating() {
+    static MetalRenderer r(OPENFILM_METALLIB_PATH);
+    return r;
+}
+
+// Plate size n on the CPU and in the given renderer (both shared ones by default) for one test.
+struct PlateSize {
+    explicit PlateSize(int n, MetalRenderer* only = nullptr) : only_(only) { set(n); }
+    ~PlateSize() { set(0); }
+    void set(int n) {
+        setCpuPlateSizeForTests(n);
+        if (only_) {
+            only_->setPlateSizeForTests(n);
+        } else {
+            renderer().setPlateSizeForTests(n);
+            generating().setPlateSizeForTests(n);
+        }
+    }
+    MetalRenderer* only_;
+};
+
+SpatialControls withPreview(SpatialControls s, uint32_t frameSeed = 7, double size = 1) {
+    s = withGrain(s, frameSeed, size);
+    s.grainQuality = GrainQuality::Preview;
+    return s;
+}
+
+// With identical plates (the GPU given the CPU's own, cpuPlates) the renders agree as closely as
+// without grain: every pixel within 1e-3. Then the GPU's own plates, which differ from the CPU's in a
+// few cloud edges (plates: gpu vs cpu), to the Full bars: 99.9 % within 1e-3, rms within 2 %.
+void checkPreview(const ImageGeometry& sg, const ImageGeometry& dg, const RenderWindow& win, const LookControls& look,
+                  const SpatialControls& spatial, const Fill& fill, bool grainy = true) {
+    const SpatialControls s = sanitize(spatial);
+    const auto cpu = cpuPlates(film()->grain, s.pxPerMm, s.grainSize, cpuPlateSize());
+    REQUIRE(renderer().setPlatesForTests((__bridge void*)[device() newCommandQueue], *film(), s.pxPerMm, s.grainSize,
+                                         *cpu));
+    const GrainResult r = runGrain(sg, dg, win, look, spatial, fill);
+    CAPTURE(r.maxDiff);
+    CAPTURE(r.rmsCpu);
+    CAPTURE(r.rmsGpu);
+    MESSAGE("preview: max |gpu - cpu| " << r.maxDiff << ", rms cpu " << r.rmsCpu << " gpu " << r.rmsGpu);
+    CHECK(r.maxDiff <= 1e-3);
+    if (!grainy) {
+        CHECK(r.rmsCpu == 0);
+        CHECK(r.rmsGpu == 0);
+    } else if (r.pixels >= 1000) {
+        CHECK(r.rmsCpu > 1e-3);
+        CHECK(std::fabs(r.rmsGpu / r.rmsCpu - 1) <= 0.02);
+    }
+    CHECK(r.alphaExact);
+    CHECK(r.outsideUntouched);
+    // The GPU's own plates (a renderer that is never given any).
+    const GrainResult own = runGrain(sg, dg, win, look, spatial, fill, &generating());
+    MESSAGE("preview, gpu plates: " << own.within * 100 << " % within 1e-3 (max " << own.maxDiff << "), rms cpu "
+                                    << own.rmsCpu << " gpu " << own.rmsGpu);
+    CHECK(own.within >= 0.999);
+    if (grainy && own.pixels >= 1000) CHECK(std::fabs(own.rmsGpu / own.rmsCpu - 1) <= 0.02);
+    CHECK(own.alphaExact);
+    CHECK(own.outsideUntouched);
+}
+
+}  // namespace
+
+TEST_CASE("plates: gpu vs cpu") {
+    REQUIRE(renderer().isValid());
+    const int n = 256;
+    PlateSize guard(n);
+    id<MTLCommandQueue> queue = [device() newCommandQueue];
+    // The three grain scales (Gaussian path, UHD, 8K), and Size 0.5 and 2 at UHD.
+    const std::pair<double, double> cases[] = {{kGrainScales[0], 1}, {kGrainScales[1], 1}, {kGrainScales[2], 1},
+                                               {kGrainScales[1], 0.5}, {kGrainScales[1], 2}};
+    for (const auto& c : cases) {
+        CAPTURE(c.first);
+        CAPTURE(c.second);
+        const auto cpu = makePlates(film()->grain, c.first, c.second, n);
+        for (int st = 0; st < 2; ++st)
+            for (int layer = 0; layer < 3; ++layer) {
+                CAPTURE(st);
+                CAPTURE(layer);
+                const std::vector<float> gpu =
+                    generating().debugPlate((__bridge void*)queue, *film(), c.first, c.second, st, layer);
+                const auto& ref = cpu->plates[size_t(st)][size_t(layer)];
+                REQUIRE(gpu.size() == ref.size());
+                size_t within = 0, exact = 0;
+                double maxDiff = 0, ss = 0;
+                for (size_t i = 0; i < ref.size(); ++i) {
+                    const float a = halfToFloat(ref[i]);
+                    const double d = std::fabs(double(gpu[i]) - double(a));
+                    within += d <= 1e-3 ? 1 : 0;  // NaN: not within
+                    exact += std::memcmp(&gpu[i], &a, sizeof(float)) == 0 ? 1 : 0;
+                    maxDiff = std::max(maxDiff, std::isnan(d) ? INFINITY : d);
+                    ss += double(a) * a;
+                }
+                MESSAGE("plate " << st << "/" << layer << ": " << exact << " of " << ref.size()
+                                 << " bit-exact, max diff " << maxDiff);
+                CHECK(ss > 0);  // a plate with grain in it
+                CHECK(double(within) >= 0.999 * double(ref.size()));
+            }
+    }
+}
+
+TEST_CASE("grain preview: gpu vs cpu") {
+    PlateSize guard(256);
+    const int w = 384, h = 216;
+    const auto g = tight(0, 0, w, h);
+    SUBCASE("all effects and grain alone, three scales") {
+        for (double pxPerMm : kGrainScales) {
+            CAPTURE(pxPerMm);
+            checkPreview(g, g, {0, 0, w, h}, LookControls{}, withPreview(spatialAllOn(pxPerMm)),
+                         pointsEdgesNoise(29, w, h));
+            SpatialControls s = spatialOff();
+            s.pxPerMm = pxPerMm;
+            checkPreview(g, g, {0, 0, w, h}, LookControls{}, withPreview(s, 99), randomFill(61, 0.f, 1.f, 1.f));
+        }
+    }
+    SUBCASE("Size, Amount and other frames") {
+        SpatialControls s = withPreview(spatialAllOn(3840 / 24.89), 0xC0FFEE, 2.0);
+        s.grainAmount = 3;
+        checkPreview(g, g, {0, 0, w, h}, LookControls{}, s, randomFill(67, 0.f, 1.f, 1.f));
+        s = withPreview(spatialAllOn(3840 / 24.89), 12345, 0.5);
+        checkPreview(g, g, {0, 0, w, h}, LookControls{}, s, randomFill(67, 0.f, 1.f, 1.f));
+    }
+    SUBCASE("odd sizes, padded rows, offset bounds, sub-windows, outside the source") {
+        for (auto wh : {std::pair<int, int>{1, 1}, {3, 97}, {1001, 17}}) {
+            CAPTURE(wh.first);
+            const auto og = tight(0, 0, wh.first, wh.second);
+            checkPreview(og, og, {0, 0, wh.first, wh.second}, LookControls{}, withPreview(spatialAllOn(3840 / 24.89)),
+                         randomFill(5, -0.1f, 1.2f));
+        }
+        const ImageGeometry sg{-300, 20, 340, 380, 640 * 16 + 80};  // negative x: the plate view wraps
+        const ImageGeometry dg{-300, 20, 340, 380, 640 * 16 + 48};
+        LookControls look;
+        look.exposureStops = 1.5;
+        for (const RenderWindow win : {RenderWindow{-160, 90, 110, 300}, RenderWindow{280, 330, 340, 380}}) {
+            CAPTURE(win.x1);
+            checkPreview(sg, dg, win, look, withPreview(spatialAllOn(3840 / 24.89)), pointsEdgesNoise(37, 640, 360));
+        }
+        checkPreview(tight(40, 30, 200, 130), tight(0, 0, 240, 160), {20, 10, 230, 150}, LookControls{},
+                     withPreview(spatialAllOn(3840 / 24.89)), pointsEdgesNoise(41, 240, 160));
+        checkPreview(tight(300, 300, 364, 332), tight(0, 0, 64, 32), {0, 0, 64, 32}, LookControls{},
+                     withPreview(spatialOff()), randomFill(43, 0.f, 1.f), false);
+    }
+    SUBCASE("non-finite pixels and controls") {
+        const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+        const float values[] = {nan, inf, -inf, -1.f, 2.f, 0.5f};
+        const auto ng = tight(0, 0, 6, 36);
+        checkPreview(ng, ng, {0, 0, 6, 36}, LookControls{}, withPreview(spatialAllOn(3840 / 24.89)),
+                     [&](int x, int y, float* p) {
+                         p[0] = values[x];
+                         p[1] = values[y % 6];
+                         p[2] = values[(y / 6) % 6];
+                         p[3] = 0.25f;
+                     });
+        SpatialControls s = withPreview(spatialOff(), 17);
+        s.grainAmount = std::numeric_limits<double>::quiet_NaN();
+        s.grainSize = std::numeric_limits<double>::quiet_NaN();
+        checkPreview(g, g, {0, 0, w, h}, LookControls{}, s, randomFill(83, 0.f, 1.f, 1.f));
+    }
+}
+
+// Four render threads meet a plate set nobody has made yet: one generates it, the other three wait
+// for it, and all four render with it. A renderer of its own so the count starts at zero.
+TEST_CASE("concurrent renders share one plate set") {
+    MetalRenderer own(OPENFILM_METALLIB_PATH);
+    REQUIRE(own.isValid());
+    PlateSize guard(256, &own);
+    CHECK(own.cachedPlateSetCount() == 0);
+    const auto g = tight(0, 0, 320, 180);
+    const RenderWindow win{0, 0, 320, 180};
+    Frame f = makeFrame(g, g, randomFill(19, 0.f, 1.f, 1.f));
+    const SpatialControls s = withPreview(spatialAllOn(3840 / 24.89), 23);
+    std::vector<std::vector<float>> out(4);
+    std::vector<int> ok(4, 0);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; ++t)
+        threads.emplace_back([&, t] {
+            @autoreleasepool {
+                id<MTLCommandQueue> queue = [device() newCommandQueue];
+                bool rendered = false;
+                out[size_t(t)] = renderGpu(queue, f, win, film(), LookControls{}, &rendered, &s, &own);
+                ok[size_t(t)] = rendered;
+            }
+        });
+    for (auto& th : threads) th.join();
+    CHECK(own.cachedPlateSetCount() == 1);
+    for (int t = 0; t < 4; ++t) {
+        CAPTURE(t);
+        CHECK(ok[size_t(t)]);
+        CHECK(out[size_t(t)] == out[0]);
+    }
+    // And the frame has grain: grain off differs.
+    SpatialControls off = s;
+    off.grain = false;
+    bool rendered = false;
+    CHECK(renderGpu([device() newCommandQueue], f, win, film(), LookControls{}, &rendered, &off, &own) != out[0]);
+}
+
+TEST_CASE("plate cache keeps two sets") {
+    MetalRenderer own(OPENFILM_METALLIB_PATH);
+    REQUIRE(own.isValid());
+    PlateSize guard(64, &own);
+    const auto g = tight(0, 0, 32, 32);
+    Frame f = makeFrame(g, g, randomFill(3, 0.f, 1.f, 1.f));
+    id<MTLCommandQueue> queue = [device() newCommandQueue];
+    for (double pxPerMm : {100.0, 150.0, 200.0}) {
+        bool ok = false;
+        const SpatialControls s = [&] {
+            SpatialControls c = spatialOff();
+            c.pxPerMm = pxPerMm;
+            return withPreview(c);
+        }();
+        renderGpu(queue, f, {0, 0, 32, 32}, film(), LookControls{}, &ok, &s, &own);
+        CHECK(ok);
+    }
+    CHECK(own.cachedPlateSetCount() == 2);
+}
+
+// The M5 speed bar: the M4 benchmark's frame and controls (UHD Super 35 noise, defaults with Bloom)
+// with Preview grain at Amount 1 on 2048 plates, already generated. Median GPU time of 50 frames, each
+// a new frame seed: <= 25 ms with grain, and grain's own cost (median with minus median without)
+// <= 5 ms. Also prints the plates' first generation (wall, host + GPU) and a profile.
+TEST_CASE("benchmark: UHD all effects + Preview grain (<= 25 ms, grain <= 5 ms)") {
+    REQUIRE(renderer().isValid());
+    renderer().setPlateSizeForTests(0);  // kPlateSize
+    const auto g = tight(0, 0, 3840, 2160);
+    Frame f = makeFrame(g, g, randomFill(71, 0.f, 1.f, 1.f));
+    id<MTLDevice> dev = device();
+    OFRecordingQueue* queue = [OFRecordingQueue new];
+    queue.real = [dev newCommandQueue];
+    id<MTLBuffer> srcBuf = [dev newBufferWithBytes:f.src.data() length:f.src.size() * 4 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dstBuf = [dev newBufferWithLength:f.cpu.size() * 4 options:MTLResourceStorageModeShared];
+    SpatialControls with;  // every control at its default...
+    with.bloom = true;     // ...with Bloom enabled
+    with.pxPerMm = 3840 / 24.89;
+    with.grain = true;     // Preview, Amount 1, Size 1
+    SpatialControls without = with;
+    without.grain = false;
+    const RenderWindow win{0, 0, 3840, 2160};
+    const auto render = [&](const SpatialControls& s) {
+        return renderer().render((__bridge void*)queue, (__bridge void*)srcBuf, g, (__bridge void*)dstBuf, g, win,
+                                 film(), LookControls{}, s);
+    };
+
+    {  // warm the plates: their first generation, waited for inside render()
+        const auto t0 = std::chrono::steady_clock::now();
+        REQUIRE(render(with));
+        [queue.last waitUntilCompleted];
+        std::printf("2048 plates, first generation + one frame (wall): %.1f ms\n",
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    }
+    renderer().setPassProfiling(true);
+    REQUIRE(render(with));
+    REQUIRE(render(with));
+    renderer().setPassProfiling(false);
+    for (const auto& p : renderer().lastPassTimes()) std::printf("  %7.3f ms  %s\n", p.ms, p.name.c_str());
+
+    const auto medianOf = [&](SpatialControls s) {
+        std::vector<double> times;
+        for (int i = 0; i < 51; ++i) {  // frame 0 warms up
+            s.frameSeed = uint32_t(1000 + i);
+            REQUIRE(render(s));
+            id<MTLCommandBuffer> cmd = queue.last;
+            [cmd waitUntilCompleted];
+            CHECK(cmd.status == MTLCommandBufferStatusCompleted);
+            if (i > 0) times.push_back(cmd.GPUEndTime - cmd.GPUStartTime);
+        }
+        std::sort(times.begin(), times.end());
+        return times[times.size() / 2] * 1e3;
+    };
+    const double mWith = medianOf(with), mWithout = medianOf(without);
+    std::printf("UHD all effects GPU median: %.3f ms with Preview grain, %.3f ms without; grain %.3f ms\n", mWith,
+                mWithout, mWith - mWithout);
+    CHECK(mWith <= 25.0);
+    CHECK(mWith - mWithout <= 5.0);
 }
 
 // Full grain at UHD Super 35 on the worst-case noise frame, every M4 control at its default: the

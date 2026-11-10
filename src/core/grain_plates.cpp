@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <future>
 #include <mutex>
 
 #include "core/pixel_ops.hpp"
@@ -59,35 +60,20 @@ float GrainPlates::sample(GrainStage st, int layer, int px, int py, uint32_t see
   return halfToFloat(plates[size_t(st)][size_t(layer)][size_t(c >> 16) * size_t(size) + size_t(c & 0xffffu)]);
 }
 
-namespace {
-std::vector<uint16_t> makePlate(const GrainLayer& g, double pxPerMm, double sizeMul, int size, uint32_t seed) {
-  std::vector<uint16_t> out(size_t(size) * size_t(size), 0);
-  const GrainUnitParams p = grainUnitParams(g, pxPerMm, sizeMul);
-  if (!(p.rPx > 0)) return out;  // no clouds: u = 0
-  const bool sim = p.rPx >= OF_GRAIN_MIN_RADIUS_PX;
-  const int periodCells = std::max(1, int(std::lround(double(size) / double(p.rPx))));
-  const float cellPx = float(size) / float(periodCells);
-  detail::parallelRows(size, [&](int y0, int y1) {
-    for (int y = y0; y < y1; ++y)
-      for (int x = 0; x < size; ++x) {
-        const float u = sim ? of_overlap_mean(x, y, p.rPx, p.lambdaPx, cellPx, seed, periodCells) - p.mu
-                            : p.gaussRms * of_gauss(x, y, seed);
-        out[size_t(y) * size_t(size) + size_t(x)] = floatToHalf(u);
-      }
-  });
-  return out;
+PlateLayerParams plateLayerParams(const GrainLayer& g, double pxPerMm, double sizeMul, int size, GrainStage st,
+                                  int layer) {
+  PlateLayerParams p;
+  p.unit = grainUnitParams(g, pxPerMm, sizeMul);
+  p.seed = grainSeed(0, st, layer);
+  if (p.unit.rPx > 0) {
+    p.periodCells = std::max(1, int(std::lround(double(size) / double(p.unit.rPx))));
+    p.cellPx = float(size) / float(p.periodCells);
+  }
+  return p;
 }
 
-struct Key {
-  std::array<double, 12> layers;  // rMm, mu of each of the 6 layers
-  double pxPerMm, sizeMul;
-  int size;
-  bool operator==(const Key& o) const {
-    return layers == o.layers && pxPerMm == o.pxPerMm && sizeMul == o.sizeMul && size == o.size;
-  }
-};
-Key keyOf(const FilmGrain& g, double pxPerMm, double sizeMul, int size) {
-  Key k{};
+PlateKey plateKey(const FilmGrain& g, double pxPerMm, double sizeMul, int size) {
+  PlateKey k;
   size_t i = 0;
   for (const auto* st : {&g.negative, &g.print})
     for (const GrainLayer& l : *st) {
@@ -100,7 +86,38 @@ Key keyOf(const FilmGrain& g, double pxPerMm, double sizeMul, int size) {
   return k;
 }
 
+namespace {
+std::vector<uint16_t> makePlate(const PlateLayerParams& p, int size) {
+  std::vector<uint16_t> out(size_t(size) * size_t(size), 0);
+  if (!(p.unit.rPx > 0)) return out;  // no clouds: u = 0
+  const bool sim = p.unit.rPx >= OF_GRAIN_MIN_RADIUS_PX;
+  detail::parallelRows(size, [&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y)
+      for (int x = 0; x < size; ++x) {
+        const float u = sim ? of_overlap_mean(x, y, p.unit.rPx, p.unit.lambdaPx, p.cellPx, p.seed, p.periodCells) -
+                                  p.unit.mu
+                            : p.unit.gaussRms * of_gauss(x, y, p.seed);
+        out[size_t(y) * size_t(size) + size_t(x)] = floatToHalf(u);
+      }
+  });
+  return out;
+}
+
 std::atomic<int> gPlateSize{kPlateSize};
+
+// The cpuPlates cache. `ready` holds the last two sets used, most recent first; `building` the keys
+// being built right now, each with the future its builder fulfils.
+using PlatesPtr = std::shared_ptr<const GrainPlates>;
+struct PlateCache {
+  std::mutex mu;
+  std::deque<std::pair<PlateKey, PlatesPtr>> ready;
+  std::vector<std::pair<PlateKey, std::shared_future<PlatesPtr>>> building;
+  size_t builds = 0;
+};
+PlateCache& plateCache() {
+  static PlateCache c;
+  return c;
+}
 }  // namespace
 
 std::shared_ptr<const GrainPlates> makePlates(const FilmGrain& g, double pxPerMm, double sizeMul, int size) {
@@ -110,22 +127,65 @@ std::shared_ptr<const GrainPlates> makePlates(const FilmGrain& g, double pxPerMm
     for (int c = 0; c < 3; ++c) {
       const auto& layers = st == 0 ? g.negative : g.print;
       pl->plates[size_t(st)][size_t(c)] =
-          makePlate(layers[size_t(c)], pxPerMm, sizeMul, size, grainSeed(0, GrainStage(st), c));
+          makePlate(plateLayerParams(layers[size_t(c)], pxPerMm, sizeMul, size, GrainStage(st), c), size);
     }
   return pl;
 }
 
 std::shared_ptr<const GrainPlates> cpuPlates(const FilmGrain& g, double pxPerMm, double sizeMul, int size) {
-  static std::mutex mu;
-  static std::deque<std::pair<Key, std::shared_ptr<const GrainPlates>>> cache;
-  const Key key = keyOf(g, pxPerMm, sizeMul, size);
-  std::lock_guard<std::mutex> lock(mu);  // held while building: concurrent frames share one build
-  for (const auto& e : cache)
-    if (e.first == key) return e.second;
-  auto made = makePlates(g, pxPerMm, sizeMul, size);
-  cache.emplace_front(key, made);
-  if (cache.size() > 2) cache.pop_back();
+  PlateCache& c = plateCache();
+  const PlateKey key = plateKey(g, pxPerMm, sizeMul, size);
+  std::promise<PlatesPtr> promise;
+  std::shared_future<PlatesPtr> pending;  // another caller's build of this key
+  {
+    std::lock_guard<std::mutex> lock(c.mu);
+    for (auto it = c.ready.begin(); it != c.ready.end(); ++it)
+      if (it->first == key) {
+        PlatesPtr hit = it->second;
+        c.ready.erase(it);
+        c.ready.emplace_front(key, hit);  // most recently used first
+        return hit;
+      }
+    for (const auto& b : c.building)
+      if (b.first == key) pending = b.second;
+    if (!pending.valid()) {
+      c.building.emplace_back(key, promise.get_future().share());
+      ++c.builds;
+    }
+  }
+  if (pending.valid()) return pending.get();  // waits with no lock held; rethrows the builder's failure
+  // This caller builds; the set is published (and the waiters woken) only once it is complete.
+  PlatesPtr made;
+  try {
+    made = makePlates(g, pxPerMm, sizeMul, size);
+  } catch (...) {
+    std::lock_guard<std::mutex> lock(c.mu);
+    c.building.erase(std::find_if(c.building.begin(), c.building.end(), [&](const auto& b) { return b.first == key; }));
+    promise.set_exception(std::current_exception());
+    throw;
+  }
+  PlatesPtr released;  // freed after the lock is dropped
+  {
+    std::lock_guard<std::mutex> lock(c.mu);
+    c.ready.emplace_front(key, made);
+    if (c.ready.size() > 2) {
+      released = std::move(c.ready.back().second);
+      c.ready.pop_back();
+    }
+    c.building.erase(std::find_if(c.building.begin(), c.building.end(), [&](const auto& b) { return b.first == key; }));
+  }
+  promise.set_value(made);
   return made;
+}
+
+size_t cpuPlateSetCount() {
+  std::lock_guard<std::mutex> lock(plateCache().mu);
+  return plateCache().ready.size();
+}
+
+size_t cpuPlateBuilds() {
+  std::lock_guard<std::mutex> lock(plateCache().mu);
+  return plateCache().builds;
 }
 
 void setCpuPlateSizeForTests(int size) { gPlateSize = size > 0 ? size : kPlateSize; }
