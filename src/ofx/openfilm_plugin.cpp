@@ -60,6 +60,11 @@ constexpr const char* kParamBloomGroup = "bloomGroup";
 constexpr const char* kParamBloomEnable = "bloomEnable";
 constexpr const char* kParamBloomAmount = "bloomAmount";
 constexpr const char* kParamBloomRadius = "bloomRadius";
+constexpr const char* kParamGrainGroup = "grainGroup";
+constexpr const char* kParamGrainEnable = "grainEnable";
+constexpr const char* kParamGrainAmount = "grainAmount";
+constexpr const char* kParamGrainSize = "grainSize";
+constexpr const char* kParamGrainQuality = "grainQuality";
 
 // Path of this bundle's Resources folder, found from where the plugin binary was loaded:
 // .../OpenFilm.ofx.bundle/Contents/MacOS/OpenFilm.ofx -> .../OpenFilm.ofx.bundle/Contents/Resources
@@ -136,6 +141,10 @@ public:
         bloom_ = fetchBooleanParam(kParamBloomEnable);
         bloomAmount_ = fetchDoubleParam(kParamBloomAmount);
         bloomRadius_ = fetchDoubleParam(kParamBloomRadius);
+        grain_ = fetchBooleanParam(kParamGrainEnable);
+        grainAmount_ = fetchDoubleParam(kParamGrainAmount);
+        grainSize_ = fetchDoubleParam(kParamGrainSize);
+        grainQuality_ = fetchChoiceParam(kParamGrainQuality);
         updateGateEnabled();
     }
 
@@ -155,7 +164,8 @@ public:
             OfxRectD roi = args.regionOfInterest;
             const double scale = args.renderScale.x > 0 ? args.renderScale.x : 1.0;
             const openfilm::SpatialControls sp = readSpatial(args.time, args.renderScale.x);
-            if (sp.anyOn()) {
+            // Grain is pointwise and needs no margin: a grain-only setting asks for exactly the window.
+            if (sp.sharpness || sp.halation || sp.bloom) {
                 const LoadedFilm& film = loadedFilm();
                 std::shared_ptr<const openfilm::BakedFilm> baked;
                 if (film.cache) {
@@ -269,6 +279,13 @@ private:
         s.bloom = bloom_->getValueAtTime(time);
         s.bloomAmount = bloomAmount_->getValueAtTime(time);
         s.bloomRadiusMm = bloomRadius_->getValueAtTime(time);
+        s.grain = grain_->getValueAtTime(time);
+        s.grainAmount = grainAmount_->getValueAtTime(time);
+        s.grainSize = grainSize_->getValueAtTime(time);
+        int quality = 0;
+        grainQuality_->getValueAtTime(time, quality);
+        s.grainQuality = quality == 1 ? openfilm::GrainQuality::Full : openfilm::GrainQuality::Preview;
+        s.frameSeed = openfilm::frameSeedFromTime(time);
         return openfilm::sanitize(s);
     }
 
@@ -323,6 +340,10 @@ private:
     OFX::BooleanParam* bloom_ = nullptr;
     OFX::DoubleParam* bloomAmount_ = nullptr;
     OFX::DoubleParam* bloomRadius_ = nullptr;
+    OFX::BooleanParam* grain_ = nullptr;
+    OFX::DoubleParam* grainAmount_ = nullptr;
+    OFX::DoubleParam* grainSize_ = nullptr;
+    OFX::ChoiceParam* grainQuality_ = nullptr;
 };
 
 }  // namespace
@@ -432,7 +453,7 @@ void OpenFilmFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::C
     OFX::GroupParamDescriptor* fmt = group(kParamFormatGroup, "Film format");
     OFX::ChoiceParamDescriptor* f = desc.defineChoiceParam(kParamFilmFormat);
     f->setLabel("Format");
-    f->setHint("Gate width of the film the image is mapped onto; sets the size of halation, bloom and sharpness");
+    f->setHint("Gate width of the film the image is mapped onto; sets the size of halation, bloom, sharpness and grain");
     for (const char* o : {"Super 35 (24.89 mm)", "35mm Academy (21.95 mm)", "Super 16 (12.52 mm)", "16mm (10.26 mm)",
                           "65mm 5-perf (52.48 mm)", "Custom"})
         f->appendOption(o);
@@ -453,6 +474,19 @@ void OpenFilmFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::C
     boolParam(kParamBloomEnable, "Enable", "In-camera diffusion (lens / diffusion filter) before the negative", false, bl);
     doubleParam(kParamBloomAmount, "Amount", "Share of the light that is diffused", 0.25, 0.0, 1.0, 0.0, 1.0, 0.01, bl);
     doubleParam(kParamBloomRadius, "Radius (mm)", "Diffusion radius on the film", 0.5, 0.05, 5.0, 0.05, 5.0, 0.05, bl);
+
+    OFX::GroupParamDescriptor* gr = group(kParamGrainGroup, "Grain");
+    boolParam(kParamGrainEnable, "Enable", "Silver-halide dye-cloud grain on the negative and on the print", true, gr);
+    doubleParam(kParamGrainAmount, "Amount", "1 = the datasheet's rms granularity; above 1 is for taste", 1.0, 0.0, 3.0, 0.0, 3.0, 0.05, gr);
+    doubleParam(kParamGrainSize, "Size", "Multiplier on the dye-cloud size (the texture scale); the datasheet rms stays the same", 1.0, 0.5, 2.0, 0.5, 2.0, 0.05, gr);
+    OFX::ChoiceParamDescriptor* gq = desc.defineChoiceParam(kParamGrainQuality);
+    gq->setLabel("Quality");
+    gq->setHint("Preview: precomputed grain plates, real time. Full: the exact per-frame simulation, slower: for renders. "
+                "Resolve does not switch this for you: set Full by hand before rendering");
+    gq->appendOption("Preview");
+    gq->appendOption("Full");
+    gq->setDefault(0);
+    gq->setParent(*gr);
 }
 
 OFX::ImageEffect* OpenFilmFactory::createInstance(OfxImageEffectHandle handle, OFX::ContextEnum /*context*/) {

@@ -219,7 +219,7 @@ std::string str(const Param* p, const char* k, int i = 0) {
 
 }  // namespace stub
 
-TEST_CASE("plugin describes the M4 controls") {
+TEST_CASE("plugin describes the M4 and M5 controls") {
   void* lib = dlopen((kBundle + "/Contents/MacOS/OpenFilm.ofx").c_str(), RTLD_NOW | RTLD_LOCAL);
   REQUIRE(lib != nullptr);
   using GetFn = OfxPlugin* (*)(int);
@@ -266,7 +266,7 @@ TEST_CASE("plugin describes the M4 controls") {
   };
 
   for (const auto& g : {std::pair<const char*, const char*>{"formatGroup", "Film format"}, {"sharpnessGroup", "Sharpness"},
-                        {"halationGroup", "Halation"}, {"bloomGroup", "Bloom"}}) {
+                        {"halationGroup", "Halation"}, {"bloomGroup", "Bloom"}, {"grainGroup", "Grain"}}) {
     CHECK(param(g.first)->type == kOfxParamTypeGroup);
     CHECK(stub::str(param(g.first), kOfxPropLabel) == g.second);
   }
@@ -291,6 +291,21 @@ TEST_CASE("plugin describes the M4 controls") {
   CHECK(stub::str(param("bloomAmount"), kOfxPropLabel) == "Amount");
   checkDouble("bloomRadius", 0.5, 0.05, 5, "bloomGroup");
   CHECK(stub::str(param("bloomRadius"), kOfxPropLabel) == "Radius (mm)");
+  // Grain (M5).
+  checkBool("grainEnable", true, "Enable", "grainGroup");
+  checkDouble("grainAmount", 1, 0, 3, "grainGroup");
+  CHECK(stub::str(param("grainAmount"), kOfxPropLabel) == "Amount");
+  checkDouble("grainSize", 1, 0.5, 2, "grainGroup");
+  CHECK(stub::str(param("grainSize"), kOfxPropLabel) == "Size");
+  const stub::Param* gq = param("grainQuality");
+  CHECK(gq->type == kOfxParamTypeChoice);
+  CHECK(stub::str(gq, kOfxPropLabel) == "Quality");
+  REQUIRE(gq->props.v.at(kOfxParamPropChoiceOption).size() == 2);
+  CHECK(stub::str(gq, kOfxParamPropChoiceOption, 0) == "Preview");
+  CHECK(stub::str(gq, kOfxParamPropChoiceOption, 1) == "Full");
+  CHECK(stub::integer(gq, kOfxParamPropDefault) == 0);
+  CHECK(stub::str(gq, kOfxParamPropParent) == "grainGroup");
+  CHECK(stub::str(gq, kOfxParamPropHint).find("Full") != std::string::npos);
   // The M3 controls are still there.
   for (const char* n : {"exposure", "negativeStock", "printStock", "printerLightR", "printDensity"}) CHECK(effect.params.find(n) != nullptr);
 }

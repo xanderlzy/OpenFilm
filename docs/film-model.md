@@ -72,6 +72,10 @@ projector → screen.**
 | Bloom | Enable | off | In-camera diffusion (lens or diffusion filter) before the light reaches the negative. |
 | Bloom | Amount | 0 to 1 (0.25) | Share of the light that is diffused. |
 | Bloom | Radius (mm) | 0.05 to 5 (0.5) | Diffusion radius measured on the film. |
+| Grain | Enable | on | Dye-cloud grain on the negative and on the print. Off is identical to a version without grain. |
+| Grain | Amount | 0 to 3 (1) | 1 is the datasheet's rms granularity; 0 is the same as off; above 1 is for taste. |
+| Grain | Size | 0.5 to 2 (1) | Scales the size of the dye clouds, so the texture gets coarser or finer. The datasheet's rms strength stays the same. |
+| Grain | Quality | Preview, Full (Preview) | Preview is real time. Full is the exact simulation, slower: set it by hand before final renders. |
 
 **How the printer lights behave.** More light in a channel exposes that print layer more, so it
 forms *more* of the complementary dye. Red light up, more cyan dye, so the picture moves toward
@@ -129,6 +133,57 @@ and on the format; with everything off it asks for nothing extra). At the edge o
 picture is extended by repeating its border pixels. On proxy or reduced-resolution playback the
 sizes are kept in proportion: a halo that is 1/50 of the width at full resolution is also 1/50 of
 the width at half resolution.
+
+## Grain
+
+**What is simulated.** Film grain is dye. After development each layer holds small clouds of
+dye, and where clouds overlap their densities add, as light through two filters does. OpenFilm
+scatters clouds of a fixed radius at random over the film, so the density at a point is the
+mean density plus or minus a random count of clouds. The texture has the same character at every
+density of a layer, and the mean density is untouched: grain adds texture, not a shift. What
+changes with density is the strength, and that follows the datasheet exactly.
+
+**Where it sits in the chain.** On the negative, grain is added to the density after development
+(and after the halation and sharpness effects), so it is a property of the negative like the real
+thing, and the print then copies it. The print has its own grain, added to the print density after
+print development, so the print's grain is not softened by the print's scatter.
+
+**Strength: measured.** Strength follows the stock's rms granularity curve from the datasheet
+(Kodak 7219 / 5219 type for the negative, Status M density; 2383 type for the print, Status A
+density), measured with a 48 micrometre circular aperture, at the actual density of each pixel.
+Amount 1 reproduces those numbers at every digitised density. The curves are read per layer, so
+the colour of the grain follows the stock.
+
+**Texture: assumed.** The datasheets give strength, not shape, so two things are assumptions:
+
+* **Cloud radius:** 5 micrometres for the negative and 2 micrometres for the print. No primary
+  source for either was found; the only figure found is secondary (a 2007 article that gives colour
+  dye clouds of about 10 to 15 micrometres across). **Size** multiplies these radii. It changes the
+  scale of the texture and not the 48 micrometre rms, so Size is a pure look control.
+* **Mean overlap:** on average 4 clouds cover any point. This sets how clumpy or smooth the
+  texture is, and the datasheet cannot fix it, so it is an assumption.
+
+**Format.** Grain is sized in millimetres on the film, like the other effects. A smaller gauge
+spreads the same grain over a larger part of the picture, so Super 16 looks coarser than Super 35
+at the same output resolution, and 65mm looks finer.
+
+**New grain every frame.** The grain pattern is seeded from the frame's time, so it changes on every
+frame, and rendering the same frame twice gives the same grain.
+
+**Quality: Preview and Full.**
+
+* **Preview** (default) reads the grain from precomputed, tiling plates, one per layer and stage,
+  so it plays in real time. It uses the same strength curve, and its statistics match Full: the rms
+  differs by about 1 % in our tests, against a 10 % bar. On the GPU it costs about 3.8 ms per UHD
+  frame on top of the other effects.
+* **Full** simulates the clouds exactly for each pixel and frame. It takes about 0.3 s per UHD
+  frame on the GPU (about 6.5 s on the CPU path). **Resolve does not switch this for you: set
+  Quality to Full by hand before a final render, and back to Preview for grading.**
+* **Waits.** The first time grain is used, and whenever the format, the gate width or Size change,
+  the plates are rebuilt, about 0.2 s on the GPU (a few seconds on the CPU path). Playback stalls
+  briefly once, then continues.
+
+**Grain off, or Amount 0,** gives exactly the same picture as without grain.
 
 ## How it renders: GPU, with no waiting on the printer lights
 
@@ -195,7 +250,7 @@ review images generated in `build/digitize-review/`.
   for it.
 * **No print D-min or base spectrum.** The print is modelled as dye density only; the clear
   base and fog of the real print film are not added.
-* **No grain** yet; it comes in a later milestone. Halation, bloom and sharpness are in (see above); their halation inputs are assumptions.
+* **Grain, halation, bloom and sharpness** are in (see their sections); the cloud radii and overlap of the grain, and the halation inputs, are assumptions.
 * **Lookup tables.** The exposure table is 129 points per side, the print-exposure and print
   tables 97 (their points are packed toward clear film, where the eye is most sensitive).
 * **Baked versus the full spectral model.** Across Exposure +/-5 stops, with printer lights and
