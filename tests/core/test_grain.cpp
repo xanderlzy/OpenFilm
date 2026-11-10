@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -11,6 +12,8 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <thread>
 
 #include "core/color.hpp"
@@ -703,6 +706,39 @@ TEST_CASE("cpu: concurrent renders share one plate set") {
     CHECK(out[t].px == out[0].px);
   }
   CHECK(out[0].px != in.px);
+}
+
+// A build that fails after the set is made (the hook stands in for an allocation failing while
+// publishing): the waiters get the failure once, nothing stays registered, and the next request builds.
+TEST_CASE("cpu: a failed plate build leaves no stuck entry") {
+  const double scale = 71.1875;  // a key no other test uses
+  const size_t builds = cpuPlateBuilds();
+  std::atomic<int> hookCalls{0};
+  setCpuPlateBuildHookForTests([&] {
+    if (hookCalls++ == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(400));  // lets the other callers queue up
+      throw std::runtime_error("injected");
+    }
+  });
+  std::atomic<int> failed{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 4; ++t)
+    threads.emplace_back([&] {
+      try {
+        cpuPlates(film().grain, scale, 1.0, 16);
+      } catch (const std::exception& e) {
+        if (std::string(e.what()) == "injected") ++failed;  // not a broken_promise
+      }
+    });
+  for (auto& th : threads) th.join();
+  CHECK(failed.load() == 4);  // the builder and its three waiters
+  CHECK(cpuPlateBuilds() == builds + 1);
+  CHECK(hookCalls == 1);
+  const auto again = cpuPlates(film().grain, scale, 1.0, 16);  // retries, and succeeds
+  CHECK(again);
+  CHECK(cpuPlateBuilds() == builds + 2);
+  CHECK(cpuPlates(film().grain, scale, 1.0, 16) == again);  // now cached
+  setCpuPlateBuildHookForTests({});
 }
 
 TEST_CASE("cpu: plate cache keeps two sets") {

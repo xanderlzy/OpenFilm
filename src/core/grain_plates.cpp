@@ -5,8 +5,10 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <future>
 #include <mutex>
+#include <stdexcept>
 
 #include "core/pixel_ops.hpp"
 #include "metal/grain_common.h"
@@ -118,6 +120,18 @@ PlateCache& plateCache() {
   static PlateCache c;
   return c;
 }
+
+// Tests only: runs in cpuPlates after a set is built and before it is published.
+std::mutex gHookMu;
+std::function<void()> gBuildHook;
+void runBuildHook() {
+  std::function<void()> hook;
+  {
+    std::lock_guard<std::mutex> lock(gHookMu);
+    hook = gBuildHook;
+  }
+  if (hook) hook();
+}
 }  // namespace
 
 std::shared_ptr<const GrainPlates> makePlates(const FilmGrain& g, double pxPerMm, double sizeMul, int size) {
@@ -154,28 +168,36 @@ std::shared_ptr<const GrainPlates> cpuPlates(const FilmGrain& g, double pxPerMm,
     }
   }
   if (pending.valid()) return pending.get();  // waits with no lock held; rethrows the builder's failure
-  // This caller builds; the set is published (and the waiters woken) only once it is complete.
-  PlatesPtr made;
+  // This caller builds; the set is published (and the waiters woken) only once it is complete. Whatever
+  // throws on the way (the build, the hook, an allocation while publishing), the in-progress entry is
+  // removed and the waiters get the failure, so the next request for the key builds again.
   try {
-    made = makePlates(g, pxPerMm, sizeMul, size);
+    PlatesPtr made = makePlates(g, pxPerMm, sizeMul, size);
+    runBuildHook();
+    PlatesPtr released;  // freed after the lock is dropped
+    {
+      std::lock_guard<std::mutex> lock(c.mu);
+      c.ready.emplace_front(key, made);
+      if (c.ready.size() > 2) {
+        released = std::move(c.ready.back().second);
+        c.ready.pop_back();
+      }
+      c.building.erase(
+          std::find_if(c.building.begin(), c.building.end(), [&](const auto& b) { return b.first == key; }));
+    }
+    promise.set_value(made);
+    return made;
   } catch (...) {
-    std::lock_guard<std::mutex> lock(c.mu);
-    c.building.erase(std::find_if(c.building.begin(), c.building.end(), [&](const auto& b) { return b.first == key; }));
-    promise.set_exception(std::current_exception());
+    const std::exception_ptr failure = std::current_exception();
+    try {
+      std::lock_guard<std::mutex> lock(c.mu);
+      auto it = std::find_if(c.building.begin(), c.building.end(), [&](const auto& b) { return b.first == key; });
+      if (it != c.building.end()) c.building.erase(it);
+    } catch (...) {
+    }
+    promise.set_exception(failure);
     throw;
   }
-  PlatesPtr released;  // freed after the lock is dropped
-  {
-    std::lock_guard<std::mutex> lock(c.mu);
-    c.ready.emplace_front(key, made);
-    if (c.ready.size() > 2) {
-      released = std::move(c.ready.back().second);
-      c.ready.pop_back();
-    }
-    c.building.erase(std::find_if(c.building.begin(), c.building.end(), [&](const auto& b) { return b.first == key; }));
-  }
-  promise.set_value(made);
-  return made;
 }
 
 size_t cpuPlateSetCount() {
@@ -186,6 +208,11 @@ size_t cpuPlateSetCount() {
 size_t cpuPlateBuilds() {
   std::lock_guard<std::mutex> lock(plateCache().mu);
   return plateCache().builds;
+}
+
+void setCpuPlateBuildHookForTests(std::function<void()> hook) {
+  std::lock_guard<std::mutex> lock(gHookMu);
+  gBuildHook = std::move(hook);
 }
 
 void setCpuPlateSizeForTests(int size) { gPlateSize = size > 0 ? size : kPlateSize; }

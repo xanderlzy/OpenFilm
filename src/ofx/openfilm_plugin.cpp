@@ -222,8 +222,15 @@ public:
                 showError("OpenFilm: GPU shaders failed to load: " + gpu.error());
                 OFX::throwSuiteStatusException(kOfxStatFailed);
             }
-            if (!gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win, baked,
-                            controls, spatial)) {
+            bool rendered = false;
+            try {
+                rendered = gpu.render(args.pMetalCmdQ, src->getPixelData(), srcGeom, dst->getPixelData(), dstGeom, win,
+                                      baked, controls, spatial);
+            } catch (const std::exception& e) {
+                showError(std::string("OpenFilm: GPU render failed: ") + e.what());
+                OFX::throwSuiteStatusException(kOfxStatFailed);
+            }
+            if (!rendered) {
                 showError("OpenFilm: GPU render failed");
                 OFX::throwSuiteStatusException(kOfxStatFailed);
             }

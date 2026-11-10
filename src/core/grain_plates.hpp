@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -63,6 +64,9 @@ size_t cpuPlateSetCount();
 size_t cpuPlateBuilds();
 // Plate size grainStage uses (default kPlateSize); tests only.
 void setCpuPlateSizeForTests(int size);
+// Tests only: `hook` runs in cpuPlates once a set is built, before it is published; it may throw to
+// simulate a failure at that point (an empty function removes it).
+void setCpuPlateBuildHookForTests(std::function<void()> hook);
 int cpuPlateSize();
 
 }  // namespace openfilm

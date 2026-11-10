@@ -14,6 +14,7 @@
 #include "metal/metal_renderer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1097,6 +1098,40 @@ TEST_CASE("concurrent renders share one plate set") {
     off.grain = false;
     bool rendered = false;
     CHECK(renderGpu([device() newCommandQueue], f, win, film(), LookControls{}, &rendered, &off, &own) != out[0]);
+}
+
+// A generation that fails after the set is made (the hook stands in for an allocation failing while
+// publishing): the waiters get the failure (no plates), nothing stays registered, and the next request
+// generates again and succeeds.
+TEST_CASE("a failed plate generation leaves no stuck entry") {
+    MetalRenderer own(OPENFILM_METALLIB_PATH);
+    REQUIRE(own.isValid());
+    PlateSize guard(64, &own);
+    std::atomic<int> hookCalls{0};
+    own.setPlateBuildHookForTests([&] {
+        if (hookCalls++ == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));  // lets the other callers queue up
+            throw std::runtime_error("injected");
+        }
+    });
+    std::vector<size_t> sizes(4, 1);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; ++t)
+        threads.emplace_back([&, t] {
+            @autoreleasepool {
+                id<MTLCommandQueue> queue = [device() newCommandQueue];
+                sizes[size_t(t)] = own.debugPlate((__bridge void*)queue, *film(), 123.0, 1.0, 0, 0).size();
+            }
+        });
+    for (auto& th : threads) th.join();
+    for (int t = 0; t < 4; ++t) CHECK(sizes[size_t(t)] == 0);
+    CHECK(own.plateGenerations() == 1);  // the three others waited rather than generating
+    CHECK(own.cachedPlateSetCount() == 0);
+    id<MTLCommandQueue> queue = [device() newCommandQueue];
+    CHECK(own.debugPlate((__bridge void*)queue, *film(), 123.0, 1.0, 0, 0).size() == 64u * 64u);
+    CHECK(own.plateGenerations() == 2);
+    CHECK(own.cachedPlateSetCount() == 1);
+    own.setPlateBuildHookForTests({});
 }
 
 TEST_CASE("plate cache keeps two sets") {

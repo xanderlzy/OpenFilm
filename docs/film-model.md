@@ -181,9 +181,12 @@ frame, and rendering the same frame twice gives the same grain.
 * **Full** simulates the clouds exactly for each pixel and frame. It takes about 0.3 s per UHD
   frame on the GPU (about 6.5 s on the CPU path). **Resolve does not switch this for you: set
   Quality to Full by hand before a final render, and back to Preview for grading.**
-* **Waits.** The first time grain is used, and whenever the format, the gate width or Size change,
-  the plates are rebuilt, about 0.2 s on the GPU (a few seconds on the CPU path). Playback stalls
-  briefly once, then continues.
+* **Waits.** The first time grain is used, and whenever the format, the gate width, Size, the
+  resolution or render scale (for example a proxy toggle) or the stock change, the plates are
+  rebuilt, about 0.2 s on the GPU (a few seconds on the CPU path). Playback stalls briefly once,
+  then continues. If you animate Size, the plates are rebuilt on every frame, so playback will
+  stutter; set Size once instead. Switching back and forth between more than two of these settings
+  does the same.
 
 **Grain off, or Amount 0,** gives exactly the same picture as without grain.
 

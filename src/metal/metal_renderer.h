@@ -14,6 +14,7 @@
 #include "core/lut.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -40,7 +41,7 @@ public:
                 const LookControls& controls);
 
     // The M4 path: the GPU twin of renderFilm() (film_spatial.hpp), pass for pass. Calls the overload
-    // above unchanged when !spatial.anyOn(). Otherwise works on the window grown by
+    // above unchanged when !sanitize(spatial).anyOn(). Otherwise works on the window grown by
     // spatialMarginPx (cut to the source, see workRect) in pooled GPU buffers that go back to the
     // pool when the command buffer completes. Commits without waiting. Thread-safe. Preview grain
     // at a scale and Size with no plate set yet first generates one on `commandQueue` and waits for
@@ -58,6 +59,9 @@ public:
     size_t plateGenerations() const;
     // Plate side for Preview grain (default kPlateSize; 0 or less restores it). Tests only.
     void setPlateSizeForTests(int size);
+    // Tests only: `hook` runs once a plate set is generated, before it is published; it may throw to
+    // simulate a failure there (an empty function removes it).
+    void setPlateBuildHookForTests(std::function<void()> hook);
     // One plate of the set for (film's grain, pxPerMm, sizeMul) at the current plate size, generated on
     // `commandQueue` if not cached, read back (tests): stage 0 negative / 1 print, layer 0..2.
     std::vector<float> debugPlate(void* commandQueue, const BakedFilm& film, double pxPerMm, double sizeMul, int stage,

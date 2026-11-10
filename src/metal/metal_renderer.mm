@@ -774,6 +774,7 @@ struct MetalRenderer::Impl {
     std::vector<std::shared_ptr<GpuPlates>> plateSets;
     std::vector<PlateBuild> plateBuilding;
     size_t plateGenerations = 0;  // generations started (tests)
+    std::function<void()> plateBuildHook;  // tests; guarded by plateMutex
     std::atomic<int> plateSize{kPlateSize};
     static constexpr size_t kPlateSetsPerDevice = 2;
 
@@ -805,23 +806,41 @@ struct MetalRenderer::Impl {
         }
         if (pending.valid()) return pending.get();  // no lock held while waiting
 
+        // Whatever throws on the way (generation, the test hook, an allocation while publishing), the
+        // in-progress entry is removed and the waiters are woken with nullptr (their renders fail), so the
+        // next request for the key generates again.
         std::shared_ptr<GpuPlates> made;
+        std::vector<std::shared_ptr<GpuPlates>> released;  // freed after the lock is dropped
         try {
             made = generatePlates(queue, makePlate, grain, pxPerMm, sizeMul, size);
             if (made) {
                 made->device = dev;
                 made->key = key;
+                std::function<void()> hook;
+                {
+                    std::lock_guard<std::mutex> lock(plateMutex);
+                    hook = plateBuildHook;
+                }
+                if (hook) hook();
             }
         } catch (...) {
             made.reset();
         }
-        std::vector<std::shared_ptr<GpuPlates>> released;  // freed after the lock is dropped
-        {
+        try {
             std::lock_guard<std::mutex> lock(plateMutex);
             if (made) publish(made, released);
             plateBuilding.erase(std::find_if(plateBuilding.begin(), plateBuilding.end(), [&](const PlateBuild& b) {
                 return b.device == dev && b.key == key;
             }));
+        } catch (...) {
+            made.reset();
+            try {
+                std::lock_guard<std::mutex> lock(plateMutex);
+                auto it = std::find_if(plateBuilding.begin(), plateBuilding.end(),
+                                       [&](const PlateBuild& b) { return b.device == dev && b.key == key; });
+                if (it != plateBuilding.end()) plateBuilding.erase(it);
+            } catch (...) {
+            }
         }
         promise.set_value(made);
         return made;
@@ -1005,6 +1024,11 @@ size_t MetalRenderer::cachedPlateSetCount() const {
 size_t MetalRenderer::plateGenerations() const {
     std::lock_guard<std::mutex> lock(impl_->plateMutex);
     return impl_->plateGenerations;
+}
+
+void MetalRenderer::setPlateBuildHookForTests(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(impl_->plateMutex);
+    impl_->plateBuildHook = std::move(hook);
 }
 
 void MetalRenderer::setPlateSizeForTests(int size) { impl_->plateSize = size > 0 ? size : kPlateSize; }
