@@ -106,12 +106,17 @@ typedef struct {
 #define OF_COMBINE_BLOOM 1     // (1 - a) X + a S, a = cw[0]
 #define OF_COMBINE_HALATION 2  // X_c + cw_c S_r
 #define OF_COMBINE_EDGE 3      // X_c + cw_c (X_c - S_c)
+#define OF_COMBINE_NONE 4      // X (a pass of pointwise stages only, no lobes: grain with no spatial effect)
 
 // Pointwise stages run after the combine, in this order (bit mask).
 #define OF_POST_DEVELOP_NEG 1
 #define OF_POST_PRINT_EXPOSE 2
 #define OF_POST_DEVELOP_PRINT 4
 #define OF_POST_FINISH 8  // grid is the render window; writes dst (as sp_finish)
+// M5 grain on density (grainStage): applied in the order DEVELOP_NEG, NEG_GRAIN, PRINT_EXPOSE,
+// DEVELOP_PRINT, PRINT_GRAIN, FINISH.
+#define OF_POST_NEG_GRAIN 16
+#define OF_POST_PRINT_GRAIN 32
 
 // The stage's shape (combine, post, channels, hasAccum, lobe count and kinds) is also passed as
 // function constants, so each stage gets its own specialised pipeline.
@@ -120,6 +125,22 @@ typedef struct {
     float cw[3];        // combine weights
     OFLobe lobes[OF_MAX_LOBES];
 } OFFuseUniforms;
+
+// ---- M5 grain (grainStage, Quality Full) ----
+// One layer's grain at one stage: D += amount * a(D) * u, u = of_grain_unit(...) at the absolute
+// frame pixel, a(D) = exp(ln sigma interpolated at D) * k over the layer's datasheet nodes.
+typedef struct {
+    float rPx, lambdaPx, mu, gaussRms;  // openfilm::GrainUnitParams
+    float k;                            // openfilm::GrainAmplitude::k (1 / unit 48 um rms at this Size)
+    int nodeOffset, nodeCount;          // the layer's nodes (density, ln sigma) in the grain node buffer
+    unsigned int seed;                  // grainSeed(frameSeed, stage, layer)
+} OFGrainLayer;
+
+typedef struct {
+    OFGrainLayer layer[6];  // negative R, G, B, then print R, G, B
+    float amount;           // Grain Amount
+    int quality;            // 0 Preview, 1 Full (the GPU runs Full for both until plates come to it)
+} OFGrainUniforms;
 
 #if defined(__cplusplus) && !defined(__METAL_VERSION__)
 // The Metal compiler lays these out with the same rules (4-byte scalars, no padding); pin the
@@ -151,6 +172,12 @@ static_assert(sizeof(OFLobe) == 52 && offsetof(OFLobe, weight) == 24 && offsetof
 static_assert(offsetof(OFFuseUniforms, cw) == 8 && offsetof(OFFuseUniforms, lobes) == 20 &&
                   sizeof(OFFuseUniforms) == 20 + 52 * OF_MAX_LOBES,
               "OFFuseUniforms layout");
+static_assert(sizeof(OFGrainLayer) == 32 && offsetof(OFGrainLayer, k) == 16 && offsetof(OFGrainLayer, nodeOffset) == 20 &&
+                  offsetof(OFGrainLayer, seed) == 28,
+              "OFGrainLayer layout");
+static_assert(offsetof(OFGrainUniforms, amount) == 192 && offsetof(OFGrainUniforms, quality) == 196 &&
+                  sizeof(OFGrainUniforms) == 200,
+              "OFGrainUniforms layout");
 #endif
 
 #endif

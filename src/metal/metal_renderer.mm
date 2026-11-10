@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <functional>
 #include <string>
@@ -58,6 +59,10 @@ struct GpuFilm {
     id<MTLBuffer> lutE4h, lutPE4, lutD4;
     OFLut3D descE, descPE, descD;
     OFCurve neg[3], print[3];
+    // Grain: every layer's datasheet nodes (density, ln sigma) as float pairs, negative R, G, B then
+    // print R, G, B; where each layer's start and how many (0 when the film has no grain data).
+    id<MTLBuffer> grainNodes;
+    int grainOffset[6] = {}, grainCount[6] = {};
 };
 
 std::shared_ptr<GpuFilm> uploadFilm(id<MTLDevice> device, const std::shared_ptr<const BakedFilm>& film) {
@@ -92,7 +97,23 @@ std::shared_ptr<GpuFilm> uploadFilm(id<MTLDevice> device, const std::shared_ptr<
     for (int c = 0; c < 3; ++c) g->neg[c] = add(film->negCurves[size_t(c)]);
     for (int c = 0; c < 3; ++c) g->print[c] = add(film->printCurves[size_t(c)]);
     g->curves = upload(device, packed);
-    if (!g->lutE || !g->lutPE || !g->lutD || !g->curves || !g->lutE4h || !g->lutPE4 || !g->lutD4) return nullptr;
+    // GrainAmplitude's nodes (amplitudeOf: density, natural log of sigma), rounded to float.
+    std::vector<float> nodes;
+    if (film->grain.valid)
+        for (int l = 0; l < 6; ++l) {
+            const GrainLayer& gl = l < 3 ? film->grain.negative[size_t(l)] : film->grain.print[size_t(l - 3)];
+            const size_t count = std::min(gl.density.size(), gl.sigma.size());
+            g->grainOffset[l] = int(nodes.size() / 2);
+            g->grainCount[l] = int(std::min<size_t>(count, size_t(kGrainMaxNodes)));
+            for (size_t i = 0; i < size_t(g->grainCount[l]); ++i) {
+                nodes.push_back(float(gl.density[i]));
+                nodes.push_back(float(std::log(gl.sigma[i])));
+            }
+        }
+    if (nodes.empty()) nodes.assign(2, 0.f);  // a buffer to bind
+    g->grainNodes = upload(device, nodes);
+    if (!g->lutE || !g->lutPE || !g->lutD || !g->curves || !g->lutE4h || !g->lutPE4 || !g->lutD4 || !g->grainNodes)
+        return nullptr;
     return g;
 }
 
@@ -636,10 +657,16 @@ std::array<float, 3> edgeGains(const std::array<LayerSharpness, 3>& layers) {
 
 // The stages of renderFilm() after exposeStage, in its order, each spread fused with its combine and
 // the pointwise stages that follow it; the last one writes the window of dst. The working image
-// starts in kFull0.
-void planStages(SpatialPlan& plan, const FilmOptics& optics, const SpatialControls& s) {
+// starts in kFull0. With `grain`, grainStage runs on the negative density after the edge effect (or
+// after development when there is none) and on the print density after print development.
+void planStages(SpatialPlan& plan, const FilmOptics& optics, const SpatialControls& s, bool grain) {
     std::vector<Stage> stages;
-    const auto post = [&](int bit) { stages.back().post |= bit; };  // there is always a stage before
+    // A pointwise stage goes on the last spatial stage before it; with none at all (grain alone) the
+    // pointwise stages make one pass of their own, with no lobes.
+    const auto post = [&](int bit) {
+        if (stages.empty()) stages.push_back({"pointwise", {}, {}, OF_COMBINE_NONE, {0, 0, 0}, 3});
+        stages.back().post |= bit;
+    };
     if (s.bloom) {
         const auto lobes = bloomPxLobes(s);
         const float a = float(s.bloomAmount);
@@ -659,12 +686,14 @@ void planStages(SpatialPlan& plan, const FilmOptics& optics, const SpatialContro
     if (s.sharpness)
         stages.push_back({"neg edge", edgeLobe(optics.negative, s.pxPerMm), {{1.f, 1.f, 1.f}}, OF_COMBINE_EDGE,
                           edgeGains(optics.negative), 3});
+    if (grain) post(OF_POST_NEG_GRAIN);
     post(OF_POST_PRINT_EXPOSE);
     if (s.sharpness) {
         const LayerPasses lp = layerPasses(optics.print, s.pxPerMm);
         stages.push_back({"print scatter", lp.passes, lp.weights, OF_COMBINE_STORE, {0, 0, 0}, 3});
     }
     post(OF_POST_DEVELOP_PRINT);  // no print edge effect (ruling R14): print density goes straight to finish
+    if (grain) post(OF_POST_PRINT_GRAIN);
     post(OF_POST_FINISH);
     int img = kFull0, other = kFull1;
     for (const Stage& st : stages) {
@@ -939,12 +968,37 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
         }
         for (int k = 0; k < 9; ++k) u.displayMatrix[k] = film->displayMatrix[size_t(k)];
 
+        // Grain (grainStage's per-frame constants, from the CPU's own functions). Quality Preview runs
+        // Full here until the GPU has plates.
+        const bool grain = s.grainOn() && film->grain.valid;
+        OFGrainUniforms gu{};
+        if (grain) {
+            const GrainAmplitudes amps = grainAmplitudes(film->grain, s.grainSize);
+            gu.amount = float(s.grainAmount);
+            gu.quality = s.grainQuality == GrainQuality::Full ? 1 : 0;
+            for (int l = 0; l < 6; ++l) {
+                const GrainStage st = l < 3 ? GrainStage::Negative : GrainStage::Print;
+                const int c = l % 3;
+                const GrainLayer& gl = l < 3 ? film->grain.negative[size_t(c)] : film->grain.print[size_t(c)];
+                const GrainUnitParams p = grainUnitParams(gl, s.pxPerMm, s.grainSize);
+                OFGrainLayer& L = gu.layer[l];
+                L.rPx = p.rPx;
+                L.lambdaPx = p.lambdaPx;
+                L.mu = p.mu;
+                L.gaussRms = p.gaussRms;
+                L.k = float(amps.stage(st)[size_t(c)].k);
+                L.nodeOffset = g->grainOffset[l];
+                L.nodeCount = g->grainCount[l];
+                L.seed = grainSeed(s.frameSeed, st, c);
+            }
+        }
+
         SpatialPlan plan(W, H, ww, wh, std::min<size_t>(device.maxThreadgroupMemoryLength, 32768),
                          impl_->directLimit.load());
         std::shared_ptr<WorkSet> set;
         id<MTLBuffer> tapsBuf = nil;
         if (W > 0 && H > 0) {
-            planStages(plan, film->optics, s);
+            planStages(plan, film->optics, s, grain);
             const size_t fullPx = size_t(W) * size_t(H);
             if (fullPx * 3 * sizeof(float) > device.maxBufferLength) return false;
             set = impl_->pool->take(device, fullPx, plan.smallPx, plan.resPx);
@@ -1013,6 +1067,8 @@ bool MetalRenderer::render(void* commandQueue, void* srcBuffer, const ImageGeome
                     [enc setBuffer:g->lutD4 offset:0 atIndex:10];
                     [enc setBuffer:src offset:0 atIndex:11];
                     [enc setBuffer:dst offset:0 atIndex:12];
+                    [enc setBytes:&gu length:sizeof(gu) atIndex:14];
+                    [enc setBuffer:g->grainNodes offset:0 atIndex:15];
                     // One thread per OF_BLOCK pixels of a column.
                     [enc dispatchThreads:MTLSizeMake(NSUInteger(plan.gridW(p)),
                                                      NSUInteger((plan.gridH(p) + OF_BLOCK - 1) / OF_BLOCK), 1)

@@ -1,7 +1,8 @@
 // GPU twin of renderFilm() with spatial effects on (src/core/film_spatial.cpp and the blur engine
 // in src/core/blur.cpp); any change there must be made here too. metal_renderer.mm plans the passes
 // from the CPU's own lobes and taps and encodes them in the CPU's order; tests/gpu/test_gpu_vs_cpu.mm
-// renders both and checks they agree.
+// renders both and checks they agree. Grain (M5, grainStage Quality Full) runs in the fused pass as
+// two pointwise stages on density, with the CPU's sampler itself (grain_common.h).
 //
 // Every kernel does the CPU's float operations in the CPU's order: blur taps are summed from -r to
 // r (one channel at a time), box averages row by row, lobes accumulate in lobe order. The taps are
@@ -15,6 +16,7 @@
 // neighbouring floats. Alpha is not carried: the last pass takes it from the source.
 #include <metal_stdlib>
 #include "metal/film_common.h"
+#include "metal/grain_common.h"
 
 using namespace metal;
 
@@ -95,7 +97,47 @@ inline void blurBlock(device const float* pl, constant float* tp, int w, int h, 
     }
 }
 
+// GrainAmplitude::at (ruling R4): ln sigma linear in density between the layer's datasheet nodes
+// (density ascending), held at the end nodes outside, found by std::upper_bound's binary search;
+// exp of it times k. 0 for a non-finite D or no nodes.
+inline float grainAmplitude(device const float2* nodes, constant OFGrainLayer& L, float D) {
+    if (!isfinite(D) || L.nodeCount <= 0) return 0.0f;
+    device const float2* nd = nodes + L.nodeOffset;
+    const int n = L.nodeCount;
+    float lnS;
+    if (D <= nd[0].x) {
+        lnS = nd[0].y;
+    } else if (D >= nd[n - 1].x) {
+        lnS = nd[n - 1].y;
+    } else {
+        int lo = 0, hi = n;  // first node with density > D
+        while (lo < hi) {
+            const int mid = (lo + hi) / 2;
+            if (D < nd[mid].x) hi = mid;
+            else lo = mid + 1;
+        }
+        const float span = nd[lo].x - nd[lo - 1].x;
+        const float t = span > 0.0f ? (D - nd[lo - 1].x) / span : 0.0f;
+        lnS = nd[lo - 1].y + t * (nd[lo].y - nd[lo - 1].y);
+    }
+    return precise::exp(lnS) * L.k;
+}
+
+// grainStage on one pixel's three densities X at stage st (0 negative, 1 print), frame pixel (ix, iy):
+// D_c += amount * a_c(D_c) * u_c; non-finite D_c unchanged, as are layers with no clouds.
+inline void addGrain(thread float3& X, int st, constant OFGrainUniforms& gu, device const float2* nodes, int ix,
+                     int iy) {
+    for (int c = 0; c < 3; ++c) {
+        constant OFGrainLayer& L = gu.layer[st * 3 + c];
+        if (!isfinite(X[c]) || !(L.rPx > 0.0f)) continue;
+        const float u = of_grain_unit(ix, iy, L.rPx, L.lambdaPx, L.mu, L.gaussRms, L.seed, 0);
+        X[c] += gu.amount * grainAmplitude(nodes, L, X[c]) * u;
+    }
+}
+
 }  // namespace
+
+static_assert(sizeof(OFGrainLayer) == 32 && sizeof(OFGrainUniforms) == 200, "OFGrainUniforms layout (see shader_types.h)");
 
 // exposeStage: DI -> linear exposure (10^lutE - eps) * gain over the work rect.
 kernel void sp_expose(device const float* src [[buffer(0)]],
@@ -305,11 +347,11 @@ constant int fcKinds [[function_constant(5)]];  // 2 bits per lobe, lobe 0 lowes
 
 // The stage's combine of the lobe sum S with its input pixel X, then the pointwise stages after it;
 // writes pixel i of the planar work image `out` (plane size n), or with finish the display pixel
-// (ix, iy) of dst.
+// (ix, iy) of dst. (ix, iy) is the pixel's frame position either way (grain is seeded by it).
 inline void emitPixel(float3 X, float3 S, constant OFFuseUniforms& fu, constant OFSpatialUniforms& u,
                       device const float* curves, device const float4* lutPE, device const float4* lutD,
                       device const float* src, device float* dst, device float* out, int n, int i, int ix,
-                      int iy) {
+                      int iy, constant OFGrainUniforms& gu, device const float2* grainNodes) {
     switch (fcCombine) {
         case OF_COMBINE_STORE:
             X = S;
@@ -320,12 +362,15 @@ inline void emitPixel(float3 X, float3 S, constant OFFuseUniforms& fu, constant 
         case OF_COMBINE_HALATION:
             for (int c = 0; c < 3; ++c) X[c] += fu.cw[c] * S[0];
             break;
-        default:  // OF_COMBINE_EDGE
+        case OF_COMBINE_EDGE:
             for (int c = 0; c < 3; ++c) X[c] += fu.cw[c] * (X[c] - S[c]);
+            break;
+        default:  // OF_COMBINE_NONE
             break;
     }
     if (fcPost & OF_POST_DEVELOP_NEG)
         for (int c = 0; c < 3; ++c) X[c] = evalCurve(curves, u.neg[c], precise::log10(stdMax(X[c], 1e-30f)));
+    if (fcPost & OF_POST_NEG_GRAIN) addGrain(X, 0, gu, grainNodes, ix, iy);
     if (fcPost & OF_POST_PRINT_EXPOSE) {
         const float3 pe = lookup(lutPE, u.lutPE, X);
         for (int c = 0; c < 3; ++c) X[c] = precise::pow(10.0f, pe[c]);
@@ -333,6 +378,7 @@ inline void emitPixel(float3 X, float3 S, constant OFFuseUniforms& fu, constant 
     if (fcPost & OF_POST_DEVELOP_PRINT)
         for (int c = 0; c < 3; ++c)
             X[c] = evalCurve(curves, u.print[c], precise::log10(stdMax(X[c], 1e-30f)) + u.offsets[c]);
+    if (fcPost & OF_POST_PRINT_GRAIN) addGrain(X, 1, gu, grainNodes, ix, iy);
     if (fcPost & OF_POST_FINISH) {
         device float* o = dst + (iy - u.dst.y1) * u.dst.rowFloats + (ix - u.dst.x1) * 4;
         const float3 q = lookup(lutD, u.lutD, X);
@@ -365,6 +411,8 @@ kernel void sp_fused(device const float* img [[buffer(0)]],
                      device const float* src [[buffer(11)]],
                      device float* dst [[buffer(12)]],
                      device const float* T2 [[buffer(13)]],
+                     constant OFGrainUniforms& gu [[buffer(14)]],
+                     device const float2* grainNodes [[buffer(15)]],
                      uint2 gid [[thread_position_in_grid]]) {
     const int W = fu.width, H = fu.height, n = W * H, K = OF_BLOCK;
     const bool finish = (fcPost & OF_POST_FINISH) != 0;
@@ -428,6 +476,6 @@ kernel void sp_fused(device const float* img [[buffer(0)]],
         }
         const int i = wy * W + wx;
         emitPixel(float3(img[i], img[n + i], img[2 * n + i]), float3(S[0][k], S[1][k], S[2][k]), fu, u, curves,
-                  lutPE, lutD, src, dst, out, n, i, ix, iy);
+                  lutPE, lutD, src, dst, out, n, i, ix, iy, gu, grainNodes);
     }
 }
