@@ -157,8 +157,10 @@ the colour of the grain follows the stock.
 **Texture: assumed.** The datasheets give strength, not shape, so two things are assumptions:
 
 * **Cloud radius:** 5 micrometres for the negative and 2 micrometres for the print. No primary
-  source for either was found; the only figure found is secondary (a 2007 article that gives colour
-  dye clouds of about 10 to 15 micrometres across). **Size** multiplies these radii. It changes the
+  source for either was found. The only figure found is secondary: T. Vitale's 2007 notes give colour
+  dye clouds of roughly 10 to 15 micrometres, without saying whether that is radius or diameter.
+  The 5 micrometre negative radius is our assumption (the low end of that range, read as a
+  diameter), and the 2 micrometre print radius is likewise ours. **Size** multiplies these radii. It changes the
   scale of the texture and not the 48 micrometre rms, so Size is a pure look control.
 * **Mean overlap:** on average 4 clouds cover any point. This sets how clumpy or smooth the
   texture is, and the datasheet cannot fix it, so it is an assumption.
