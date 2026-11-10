@@ -1067,6 +1067,7 @@ TEST_CASE("concurrent renders share one plate set") {
     REQUIRE(own.isValid());
     PlateSize guard(256, &own);
     CHECK(own.cachedPlateSetCount() == 0);
+    CHECK(own.plateGenerations() == 0);
     const auto g = tight(0, 0, 320, 180);
     const RenderWindow win{0, 0, 320, 180};
     Frame f = makeFrame(g, g, randomFill(19, 0.f, 1.f, 1.f));
@@ -1085,6 +1086,7 @@ TEST_CASE("concurrent renders share one plate set") {
         });
     for (auto& th : threads) th.join();
     CHECK(own.cachedPlateSetCount() == 1);
+    CHECK(own.plateGenerations() == 1);  // one generated, three waited (a duplicate would replace it: count 1)
     for (int t = 0; t < 4; ++t) {
         CAPTURE(t);
         CHECK(ok[size_t(t)]);

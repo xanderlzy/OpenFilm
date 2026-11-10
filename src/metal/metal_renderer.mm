@@ -773,6 +773,7 @@ struct MetalRenderer::Impl {
     mutable std::mutex plateMutex;
     std::vector<std::shared_ptr<GpuPlates>> plateSets;
     std::vector<PlateBuild> plateBuilding;
+    size_t plateGenerations = 0;  // generations started (tests)
     std::atomic<int> plateSize{kPlateSize};
     static constexpr size_t kPlateSetsPerDevice = 2;
 
@@ -797,7 +798,10 @@ struct MetalRenderer::Impl {
                 }
             for (const PlateBuild& b : plateBuilding)
                 if (b.device == dev && b.key == key) pending = b.done;
-            if (!pending.valid()) plateBuilding.push_back({dev, key, promise.get_future().share()});
+            if (!pending.valid()) {
+                plateBuilding.push_back({dev, key, promise.get_future().share()});
+                ++plateGenerations;
+            }
         }
         if (pending.valid()) return pending.get();  // no lock held while waiting
 
@@ -996,6 +1000,11 @@ std::vector<MetalRenderer::PassTime> MetalRenderer::lastPassTimes() const {
 size_t MetalRenderer::cachedPlateSetCount() const {
     std::lock_guard<std::mutex> lock(impl_->plateMutex);
     return impl_->plateSets.size();
+}
+
+size_t MetalRenderer::plateGenerations() const {
+    std::lock_guard<std::mutex> lock(impl_->plateMutex);
+    return impl_->plateGenerations;
 }
 
 void MetalRenderer::setPlateSizeForTests(int size) { impl_->plateSize = size > 0 ? size : kPlateSize; }

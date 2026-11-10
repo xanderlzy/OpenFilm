@@ -52,8 +52,10 @@ public:
     // Number of film table sets currently held on the GPU (for tests).
     size_t cachedFilmCount() const;
 
-    // Preview grain plate sets held on the GPU (all devices).
+    // Preview grain plate sets held on the GPU (all devices), and how many generations this renderer
+    // has started so far (tests).
     size_t cachedPlateSetCount() const;
+    size_t plateGenerations() const;
     // Plate side for Preview grain (default kPlateSize; 0 or less restores it). Tests only.
     void setPlateSizeForTests(int size);
     // One plate of the set for (film's grain, pxPerMm, sizeMul) at the current plate size, generated on
